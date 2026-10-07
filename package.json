@@ -6,6 +6,17 @@
   "type": "module",
   "license": "MIT",
   "author": "onive",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/onive/opencode-websearch-deepseek.git"
+  },
+  "homepage": "https://github.com/onive/opencode-websearch-deepseek#readme",
+  "bugs": {
+    "url": "https://github.com/onive/opencode-websearch-deepseek/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "keywords": [
     "opencode",
     "opencode-plugin",

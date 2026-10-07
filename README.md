@@ -15,7 +15,9 @@ source URLs it was based on.
 
 ## Requirements
 
-- OpenCode with the V2 plugin API (the `plugins` config field).
+- **OpenCode 2.x** with the V2 plugin API (the `plugins` config field). The
+  OpenCode 1.x plugin loader expects the legacy `server()` export and will not
+  load this plugin.
 - Node.js 18+ (for `fetch`; OpenCode's runtime already provides it).
 - A DeepSeek API key.
 
