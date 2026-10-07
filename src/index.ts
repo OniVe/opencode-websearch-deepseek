@@ -66,6 +66,8 @@ export interface WebSearchResult {
 export interface DeepSeekSource {
   url: string
   title?: string
+  /** Snippet for this source, taken from a `citations[].cited_text` field. */
+  content?: string
 }
 
 /** Options accepted by {@link buildRequestBody}. */
@@ -125,8 +127,12 @@ function readEnv(name: string, env: NodeJS.ProcessEnv = process.env): string | u
  * Falls back to {@link DEFAULT_MAX_USES} for missing or invalid input.
  */
 export function resolveMaxUses(raw: string | undefined = process.env.WEBSEARCH_MAX_USES): number {
-  const parsed = Number.parseInt((raw ?? "").trim(), 10)
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_USES
+  const value = (raw ?? "").trim()
+  // Strict: only a plain positive integer. Rejects "1e3", "5.5", "5abc" and
+  // values outside the safe-integer range (e.g. a 24-digit number).
+  if (!/^\d+$/.test(value)) return DEFAULT_MAX_USES
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_USES
 }
 
 /**
@@ -153,10 +159,10 @@ export function buildRequestBody(query: string, options: BuildRequestOptions): R
   const body: Record<string, unknown> = {
     model: options.model,
     max_tokens: options.maxTokens ?? 32768,
-    messages: [
-      { role: "system", content: options.system ?? SYSTEM_PROMPT },
-      { role: "user", content: query },
-    ],
+    // Anthropic-compatible contract: the system prompt is a top-level field,
+    // not a `system` role inside `messages`.
+    system: options.system ?? SYSTEM_PROMPT,
+    messages: [{ role: "user", content: query }],
     tools: [tool],
     tool_choice: { type: "auto" },
   }
@@ -168,16 +174,23 @@ export function buildRequestBody(query: string, options: BuildRequestOptions): R
   return body
 }
 
-/** Remove duplicate sources by URL while preserving first-seen order. */
+/**
+ * Merge duplicate sources by URL while preserving first-seen order. Missing
+ * `title`/`content` fields are filled from later duplicates.
+ */
 export function dedupeSources(sources: readonly DeepSeekSource[]): DeepSeekSource[] {
-  const seen = new Set<string>()
-  const unique: DeepSeekSource[] = []
+  const byUrl = new Map<string, DeepSeekSource>()
   for (const source of sources) {
-    if (!source?.url || seen.has(source.url)) continue
-    seen.add(source.url)
-    unique.push(source)
+    if (typeof source?.url !== "string" || source.url.length === 0) continue
+    const existing = byUrl.get(source.url)
+    if (!existing) {
+      byUrl.set(source.url, { ...source })
+      continue
+    }
+    if (!existing.title && source.title) existing.title = source.title
+    if (!existing.content && source.content) existing.content = source.content
   }
-  return unique
+  return [...byUrl.values()]
 }
 
 /**
@@ -188,14 +201,16 @@ export function extractAnswerAndSources(data: DeepSeekResponse): {
   answer: string
   sources: DeepSeekSource[]
 } {
-  const sources: DeepSeekSource[] = []
+  const collected: DeepSeekSource[] = []
   const textParts: string[] = []
 
-  for (const block of data?.content ?? []) {
+  const blocks = Array.isArray(data?.content) ? data.content : []
+
+  for (const block of blocks) {
     if (block?.type === "web_search_tool_result" && Array.isArray(block.content)) {
       for (const item of block.content as Array<Record<string, unknown>>) {
         if (item?.type === "web_search_result" && typeof item.url === "string") {
-          sources.push({
+          collected.push({
             url: item.url,
             title: typeof item.title === "string" ? item.title : item.url,
           })
@@ -204,16 +219,30 @@ export function extractAnswerAndSources(data: DeepSeekResponse): {
     } else if (block?.type === "text" && typeof block.text === "string" && block.text.trim()) {
       textParts.push(block.text.trim())
     }
+
+    // Text blocks may carry `citations[].cited_text` snippets for their sources.
+    const citations = (block as { citations?: unknown } | undefined)?.citations
+    if (Array.isArray(citations)) {
+      for (const citation of citations as Array<Record<string, unknown>>) {
+        if (
+          typeof citation?.url === "string" &&
+          typeof citation.cited_text === "string" &&
+          citation.cited_text.trim()
+        ) {
+          collected.push({ url: citation.url, content: citation.cited_text.trim() })
+        }
+      }
+    }
   }
 
-  return { answer: textParts.join("\n\n"), sources: dedupeSources(sources) }
+  return { answer: textParts.join("\n\n"), sources: dedupeSources(collected) }
 }
 
 /**
  * Build the result list OpenCode expects: the synthesized answer first (when
  * present), followed by the individual sources.
  */
-export function toResults(answer: string, sources: readonly DeepSeekSource[]): WebSearchResult[] {
+export function toResults(answer: string, sources: readonly DeepSeekSource[] = []): WebSearchResult[] {
   const results: WebSearchResult[] = []
   if (answer) {
     results.push({
@@ -224,7 +253,12 @@ export function toResults(answer: string, sources: readonly DeepSeekSource[]): W
     })
   }
   for (const source of sources) {
-    results.push({ url: source.url, title: source.title || source.url, content: "", time: {} })
+    results.push({
+      url: source.url,
+      title: source.title || source.url,
+      content: source.content ?? "",
+      time: {},
+    })
   }
   if (results.length === 0) {
     results.push({

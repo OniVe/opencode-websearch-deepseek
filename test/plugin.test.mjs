@@ -43,6 +43,10 @@ test("resolveMaxUses defaults to 5 and accepts a positive override", () => {
   assert.equal(resolveMaxUses("0"), DEFAULT_MAX_USES)
   assert.equal(resolveMaxUses("-3"), DEFAULT_MAX_USES)
   assert.equal(resolveMaxUses("nope"), DEFAULT_MAX_USES)
+  assert.equal(resolveMaxUses("5abc"), DEFAULT_MAX_USES)
+  assert.equal(resolveMaxUses("5.5"), DEFAULT_MAX_USES)
+  assert.equal(resolveMaxUses("1e3"), DEFAULT_MAX_USES)
+  assert.equal(resolveMaxUses("999999999999999999999999"), DEFAULT_MAX_USES)
 })
 
 test("resolveThinking is enabled unless explicitly disabled", () => {
@@ -60,6 +64,8 @@ test("buildRequestBody declares the search tool with max_uses", () => {
   assert.deepEqual(body.tools, [{ type: "web_search_20250305", name: "web_search", max_uses: 7 }])
   assert.deepEqual(body.tool_choice, { type: "auto" })
   assert.deepEqual(body.thinking, { type: "enabled" })
+  assert.equal(typeof body.system, "string")
+  assert.deepEqual(body.messages, [{ role: "user", content: "hello" }])
 })
 
 test("buildRequestBody omits thinking when disabled", () => {
@@ -67,15 +73,17 @@ test("buildRequestBody omits thinking when disabled", () => {
   assert.equal("thinking" in body, false)
 })
 
-test("dedupeSources removes duplicate URLs and keeps first-seen order", () => {
+test("dedupeSources merges duplicate URLs and drops invalid ones", () => {
   const sources = [
     { url: "https://a", title: "A" },
-    { url: "https://b", title: "B" },
-    { url: "https://a", title: "A again" },
+    { url: "https://b" },
+    { url: "https://a", title: "A again", content: "snippet" },
+    { url: 123 },
+    { url: "" },
   ]
   assert.deepEqual(dedupeSources(sources), [
-    { url: "https://a", title: "A" },
-    { url: "https://b", title: "B" },
+    { url: "https://a", title: "A", content: "snippet" },
+    { url: "https://b" },
   ])
 })
 
@@ -104,6 +112,24 @@ test("extractAnswerAndSources joins text and de-duplicates sources", () => {
   ])
 })
 
+test("extractAnswerAndSources tolerates hostile payloads and reads citation snippets", () => {
+  assert.deepEqual(extractAnswerAndSources({ content: 42 }), { answer: "", sources: [] })
+  assert.deepEqual(extractAnswerAndSources({ content: "oops" }), { answer: "", sources: [] })
+  assert.deepEqual(extractAnswerAndSources({ content: null }), { answer: "", sources: [] })
+  assert.deepEqual(extractAnswerAndSources({}), { answer: "", sources: [] })
+
+  const { sources } = extractAnswerAndSources({
+    content: [
+      { type: "text", text: "Answer.", citations: [{ url: "https://a", cited_text: "quoted text" }] },
+      {
+        type: "web_search_tool_result",
+        content: [{ type: "web_search_result", url: "https://a", title: "A" }],
+      },
+    ],
+  })
+  assert.deepEqual(sources, [{ url: "https://a", title: "A", content: "quoted text" }])
+})
+
 test("toResults returns the answer first, then sources, and never empty", () => {
   const results = toResults("answer", [{ url: "https://a", title: "A" }])
   assert.equal(results.length, 2)
@@ -114,6 +140,10 @@ test("toResults returns the answer first, then sources, and never empty", () => 
   const empty = toResults("", [])
   assert.equal(empty.length, 1)
   assert.equal(empty[0].title, "DeepSeek web search")
+
+  // `sources` is optional; toResults must stay total when called directly.
+  assert.equal(toResults("answer").length, 1)
+  assert.equal(toResults("answer", undefined).length, 1)
 })
 
 /**
@@ -161,7 +191,7 @@ test("execute sends the API key, version header, and improvements", async () => 
       status: 200,
       json: async () => ({
         content: [
-          { type: "text", text: "The answer." },
+          { type: "text", text: "The answer.", citations: [{ url: "https://a", cited_text: "snippet" }] },
           {
             type: "web_search_tool_result",
             content: [
@@ -185,10 +215,13 @@ test("execute sends the API key, version header, and improvements", async () => 
   assert.equal(body.model, "deepseek-v4-flash")
   assert.equal(body.tools[0].max_uses, 9)
   assert.equal("thinking" in body, false)
+  assert.equal(typeof body.system, "string")
+  assert.deepEqual(body.messages, [{ role: "user", content: "hi" }])
 
   assert.equal(results.length, 2)
   assert.equal(results[0].content, "The answer.")
   assert.equal(results[1].url, "https://a")
+  assert.equal(results[1].content, "snippet")
 })
 
 test("execute fails fast without an API key", async () => {

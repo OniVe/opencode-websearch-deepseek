@@ -19,7 +19,8 @@ jobs:
           registry-url: https://registry.npmjs.org
       - run: npm ci
       - run: npm run typecheck
-      - run: node --test
+      # `npm test` builds first (dist/ is gitignored and absent after npm ci).
+      - run: npm test
         env:
           # tests mock fetch, no real key is needed
           DEEPSEEK_API_KEY: ""
