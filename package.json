@@ -5,14 +5,14 @@
   "description": "DeepSeek-powered web search provider for OpenCode's built-in websearch tool.",
   "type": "module",
   "license": "MIT",
-  "author": "onive",
+  "author": "OniVe",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/onive/opencode-websearch-deepseek.git"
+    "url": "git+https://github.com/OniVe/opencode-websearch-deepseek.git"
   },
-  "homepage": "https://github.com/onive/opencode-websearch-deepseek#readme",
+  "homepage": "https://github.com/OniVe/opencode-websearch-deepseek#readme",
   "bugs": {
-    "url": "https://github.com/onive/opencode-websearch-deepseek/issues"
+    "url": "https://github.com/OniVe/opencode-websearch-deepseek/issues"
   },
   "publishConfig": {
     "access": "public"

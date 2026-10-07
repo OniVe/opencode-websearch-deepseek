@@ -118,4 +118,4 @@ OpenCode:
 
 ## License
 
-[MIT](./LICENSE) © onive
+[MIT](./LICENSE) © OniVe
