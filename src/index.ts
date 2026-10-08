@@ -123,21 +123,56 @@ export interface IntegrationContext {
   }
 }
 
+/**
+ * Options accepted through the `plugins` object form in `opencode.json(c)` and
+ * forwarded to the plugin via `ctx.options`:
+ *
+ * ```jsonc
+ * { "plugins": [{ "package": "opencode-websearch-deepseek", "options": {
+ *   "apiKey": "...", "model": "deepseek-v4-flash", "maxUses": 5, "thinking": "enabled"
+ * } }] }
+ * ```
+ */
+export interface WebsearchOptions {
+  /** DeepSeek API key; takes precedence over env and the stored credential. */
+  apiKey?: string
+  /** Model used for search and synthesis. */
+  model?: string
+  /** Max server-side searches per query. */
+  maxUses?: number | string
+  /** `enabled` or `disabled`. */
+  thinking?: string
+}
+
 /** Context passed to the plugin's `setup`. */
 export interface WebsearchContext {
   websearch: {
     transform(callback: (editor: WebsearchEditor) => void): Promise<unknown> | unknown
   }
+  /** Plugin options from the `plugins` object form. */
+  options?: Record<string, unknown>
   /** Present in OpenCode 2.x; used to reuse the DeepSeek provider credential. */
   integration?: IntegrationContext
 }
 
+/** Return a trimmed non-empty string, or undefined for any other value. */
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined
+}
+
 /**
- * Resolve the DeepSeek API key. An explicit environment variable takes
- * precedence; otherwise the key OpenCode stores for the `deepseek` provider
- * (configured via `opencode auth login`) is used.
+ * Resolve the DeepSeek API key, in order of precedence: the `apiKey` plugin
+ * option, then the `DEEPSEEK_API_KEY`/`WEBSEARCH_API_KEY` environment
+ * variables, then the credential OpenCode stores for the `deepseek` provider
+ * (configured via `opencode auth login`).
  */
-export async function resolveApiKey(ctx: WebsearchContext): Promise<string | undefined> {
+export async function resolveApiKey(
+  ctx: WebsearchContext,
+  options?: WebsearchOptions,
+): Promise<string | undefined> {
+  const fromOptions = readString(options?.apiKey)
+  if (fromOptions) return fromOptions
+
   const fromEnv = readEnv("DEEPSEEK_API_KEY") ?? readEnv("WEBSEARCH_API_KEY")
   if (fromEnv) return fromEnv
 
@@ -179,7 +214,10 @@ function throwCancellation(signal: AbortSignal, fallback: unknown): never {
  * Resolve the `max_uses` value for the search tool declaration.
  * Falls back to {@link DEFAULT_MAX_USES} for missing or invalid input.
  */
-export function resolveMaxUses(raw: string | undefined = process.env.WEBSEARCH_MAX_USES): number {
+export function resolveMaxUses(raw: string | number | undefined = process.env.WEBSEARCH_MAX_USES): number {
+  if (typeof raw === "number") {
+    return Number.isSafeInteger(raw) && raw > 0 ? raw : DEFAULT_MAX_USES
+  }
   const value = (typeof raw === "string" ? raw : "").trim()
   // Strict: only a plain positive integer. Rejects "1e3", "5.5", "5abc" and
   // values outside the safe-integer range (e.g. a 24-digit number).
@@ -329,15 +367,17 @@ export const plugin = {
   id: "websearch.deepseek",
 
   async setup(ctx: WebsearchContext): Promise<void> {
+    const options = (ctx.options ?? {}) as WebsearchOptions
+
     await ctx.websearch.transform((editor) => {
       editor.add({
         id: "deepseek",
         name: "DeepSeek Web Search",
         execute: async ({ query }, { signal } = {}) => {
-          const apiKey = await resolveApiKey(ctx)
+          const apiKey = await resolveApiKey(ctx, options)
           if (!apiKey) {
             throw new Error(
-              "DEEPSEEK_API_KEY is not set and no stored DeepSeek credential was found; set the env var or sign in to the deepseek provider in OpenCode",
+              "No DeepSeek API key: set the DEEPSEEK_API_KEY env var, pass the apiKey plugin option, or sign in to the deepseek provider in OpenCode",
             )
           }
           if (!/^[\x21-\x7e]+$/.test(apiKey)) {
@@ -345,9 +385,9 @@ export const plugin = {
           }
 
           const body = buildRequestBody(query, {
-            model: readEnv("WEBSEARCH_MODEL") ?? DEFAULT_MODEL,
-            maxUses: resolveMaxUses(),
-            thinking: resolveThinking(),
+            model: readString(options.model) ?? readEnv("WEBSEARCH_MODEL") ?? DEFAULT_MODEL,
+            maxUses: resolveMaxUses(options.maxUses ?? readEnv("WEBSEARCH_MAX_USES")),
+            thinking: resolveThinking(readString(options.thinking) ?? readEnv("WEBSEARCH_THINKING")),
           })
 
           const response = await fetch(API_URL, {

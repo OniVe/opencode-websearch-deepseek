@@ -47,8 +47,10 @@ test("resolveMaxUses defaults to 5 and accepts a positive override", () => {
   assert.equal(resolveMaxUses("5.5"), DEFAULT_MAX_USES)
   assert.equal(resolveMaxUses("1e3"), DEFAULT_MAX_USES)
   assert.equal(resolveMaxUses("999999999999999999999999"), DEFAULT_MAX_USES)
-  // Non-string input is out of contract; the helper must stay total.
-  assert.equal(resolveMaxUses(42), DEFAULT_MAX_USES)
+  // Numeric input (from plugin options) is accepted; other types stay total.
+  assert.equal(resolveMaxUses(42), 42)
+  assert.equal(resolveMaxUses(0), DEFAULT_MAX_USES)
+  assert.equal(resolveMaxUses(-3), DEFAULT_MAX_USES)
   assert.equal(resolveMaxUses(null), DEFAULT_MAX_USES)
 })
 
@@ -428,4 +430,39 @@ test("environment key takes precedence over the stored credential", async () => 
   await captured.execute({ query: "hi" }, {})
   assert.equal(seen.headers["x-api-key"], "sk-env")
   assert.equal(resolveCalls, 0)
+})
+
+test("plugin options configure key, model, max_uses, and thinking", async () => {
+  let captured
+  const fake = {
+    websearch: {
+      async transform(callback) {
+        callback({ add(provider) { captured = provider }, default: { set() {} } })
+      },
+    },
+    options: { apiKey: "sk-option-key", model: "my-model", maxUses: 9, thinking: "disabled" },
+  }
+  await plugin.setup(fake)
+  process.env.DEEPSEEK_API_KEY = "sk-env"
+  delete process.env.WEBSEARCH_MODEL
+  delete process.env.WEBSEARCH_MAX_USES
+  delete process.env.WEBSEARCH_THINKING
+
+  let seen
+  globalThis.fetch = async (url, init) => {
+    seen = init
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ content: [{ type: "text", text: "ok" }] }),
+      text: async () => "",
+    }
+  }
+  await captured.execute({ query: "hi" }, {})
+
+  assert.equal(seen.headers["x-api-key"], "sk-option-key")
+  const body = JSON.parse(seen.body)
+  assert.equal(body.model, "my-model")
+  assert.equal(body.tools[0].max_uses, 9)
+  assert.equal("thinking" in body, false)
 })

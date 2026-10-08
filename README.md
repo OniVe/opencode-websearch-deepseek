@@ -77,6 +77,34 @@ in:
 > so no environment variable is required when that provider is already
 > authenticated.
 
+### Plugin options
+
+As an alternative to environment variables, configure the plugin with the
+`plugins` object form (read from `ctx.options`):
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    {
+      "package": "opencode-websearch-deepseek",
+      "options": {
+        "apiKey": "{file:~/.config/opencode/deepseek.key}",
+        "model": "deepseek-v4-flash",
+        "maxUses": 5,
+        "thinking": "enabled"
+      }
+    }
+  ]
+}
+```
+
+Precedence for the API key: `options.apiKey` → `DEEPSEEK_API_KEY` /
+`WEBSEARCH_API_KEY` → stored `deepseek` provider credential. `model`, `maxUses`,
+and `thinking` fall back to their environment variables and defaults.
+OpenCode interpolates `{file:...}` (and `{env:...}`) in config values, so the
+key can live in a file instead of the OS environment.
+
 > The plugin always selects the DeepSeek provider. Without an API key, a
 > `websearch` call fails with a clear error rather than silently falling back
 > to a different provider.
