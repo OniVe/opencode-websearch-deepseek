@@ -44,9 +44,8 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test",
-    "prepare": "npm run build",
+    "prepare": "node -e \"try{require.resolve('typescript')}catch{process.exit(0)};require('node:child_process').execSync('npm run build',{stdio:'inherit'})\"",
     "prepack": "npm run build",
-    "prepublishOnly": "npm run build && node --test",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
   },
   "devDependencies": {

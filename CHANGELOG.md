@@ -21,7 +21,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Source de-duplication by URL, preserving first-seen order.
 - Read `citations[].cited_text` snippets into source `content` when present
   (defensive; DeepSeek may not emit them).
-- Unit tests (16) and CI, plus npm release tooling.
+- Unit tests and CI, plus npm release tooling.
 
 ### Changed
 

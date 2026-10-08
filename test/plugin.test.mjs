@@ -599,3 +599,37 @@ test("execute reports a non-2xx body read failure", async () => {
     /body read failed: socket hang up/,
   )
 })
+
+test("execute normalises a raw abort reason from fetch", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  const controller = new AbortController()
+  controller.abort("raw-cancel")
+  // undici rejects fetch with the raw signal reason (here: a string).
+  globalThis.fetch = async () => {
+    throw "raw-cancel"
+  }
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, { signal: controller.signal }),
+    (error) => error instanceof Error && error.message === "raw-cancel",
+  )
+})
+
+test("execute normalises a raw abort reason from response.json", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  const controller = new AbortController()
+  controller.abort({ code: 7 })
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => "",
+    json: async () => {
+      throw { code: 7 }
+    },
+  })
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, { signal: controller.signal }),
+    (error) => error instanceof Error && error.message === "The web search was aborted",
+  )
+})

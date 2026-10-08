@@ -205,8 +205,9 @@ function throwCancellation(signal: AbortSignal, fallback: unknown): never {
   const reason: unknown = signal.reason
   if (reason instanceof Error) throw reason
   if (typeof reason === "object" && reason !== null) {
-    // Preserve AbortError-like objects; wrap anything else.
-    if ((reason as { name?: unknown }).name === "AbortError") throw reason
+    // Preserve AbortError-like objects (DOMException has a message); wrap the rest.
+    const candidate = reason as { name?: unknown; message?: unknown }
+    if (candidate.name === "AbortError" && typeof candidate.message === "string") throw reason
     throw new Error("The web search was aborted", { cause: reason })
   }
   if (reason !== undefined && reason !== null) {
@@ -407,51 +408,58 @@ export const plugin = {
         name: "DeepSeek Web Search",
         execute: async ({ query }, context) => {
           const signal = context?.signal
-          const apiKey = await resolveApiKey(ctx, options)
-          if (!apiKey) {
-            throw new Error(
-              "No DeepSeek API key: set the DEEPSEEK_API_KEY env var, pass the apiKey plugin option, or sign in to the deepseek provider in OpenCode",
-            )
-          }
-          if (!/^[\x21-\x7e]+$/.test(apiKey)) {
-            throw new Error("The API key contains invalid characters")
-          }
+          try {
+            const apiKey = await resolveApiKey(ctx, options)
+            if (!apiKey) {
+              throw new Error(
+                "No DeepSeek API key: set the DEEPSEEK_API_KEY env var, pass the apiKey plugin option, or sign in to the deepseek provider in OpenCode",
+              )
+            }
+            if (!/^[\x21-\x7e]+$/.test(apiKey)) {
+              throw new Error("The API key contains invalid characters")
+            }
 
-          const body = buildRequestBody(query, {
-            model: readString(options.model) ?? readEnv("WEBSEARCH_MODEL") ?? DEFAULT_MODEL,
-            // Valid options win; an unset or invalid option falls back to env.
-            maxUses: pickMaxUses(options.maxUses) ?? resolveMaxUses(readEnv("WEBSEARCH_MAX_USES")),
-            thinking: pickThinking(options.thinking) ?? resolveThinking(readEnv("WEBSEARCH_THINKING")),
-          })
-
-          const response = await fetch(API_URL, {
-            method: "POST",
-            signal,
-            headers: {
-              "content-type": "application/json",
-              "x-api-key": apiKey,
-              "anthropic-version": ANTHROPIC_VERSION,
-            },
-            body: JSON.stringify(body),
-          })
-
-          if (!response.ok) {
-            const text = await response.text().catch((error: unknown) => {
-              // Preserve cancellation: never turn an abort into an API error.
-              if (signal?.aborted) return throwCancellation(signal, error)
-              if ((error as { name?: string } | undefined)?.name === "AbortError") throw error
-              const detail = error instanceof Error ? error.message : String(error)
-              return `[body read failed: ${detail}]`
+            const body = buildRequestBody(query, {
+              model: readString(options.model) ?? readEnv("WEBSEARCH_MODEL") ?? DEFAULT_MODEL,
+              // Valid options win; an unset or invalid option falls back to env.
+              maxUses: pickMaxUses(options.maxUses) ?? resolveMaxUses(readEnv("WEBSEARCH_MAX_USES")),
+              thinking: pickThinking(options.thinking) ?? resolveThinking(readEnv("WEBSEARCH_THINKING")),
             })
-            // An abort can also arrive after the body resolves; re-check so it
-            // is not masked as an API error.
-            if (signal?.aborted) throwCancellation(signal, undefined)
-            throw new Error(`DeepSeek API error ${response.status}: ${text.slice(0, 300)}`)
-          }
 
-          const data = (await response.json()) as DeepSeekResponse
-          const { answer, sources } = extractAnswerAndSources(data)
-          return toResults(answer, sources)
+            const response = await fetch(API_URL, {
+              method: "POST",
+              signal,
+              headers: {
+                "content-type": "application/json",
+                "x-api-key": apiKey,
+                "anthropic-version": ANTHROPIC_VERSION,
+              },
+              body: JSON.stringify(body),
+            })
+
+            if (!response.ok) {
+              const text = await response.text().catch((error: unknown) => {
+                // Preserve cancellation: never turn an abort into an API error.
+                if (signal?.aborted) return throwCancellation(signal, error)
+                if ((error as { name?: string } | undefined)?.name === "AbortError") throw error
+                const detail = error instanceof Error ? error.message : String(error)
+                return `[body read failed: ${detail}]`
+              })
+              // An abort can also arrive after the body resolves; re-check so it
+              // is not masked as an API error.
+              if (signal?.aborted) throwCancellation(signal, undefined)
+              throw new Error(`DeepSeek API error ${response.status}: ${text.slice(0, 300)}`)
+            }
+
+            const data = (await response.json()) as DeepSeekResponse
+            const { answer, sources } = extractAnswerAndSources(data)
+            return toResults(answer, sources)
+          } catch (error) {
+            // `fetch`/`json` reject with the raw signal reason; normalise any
+            // cancellation so callers always receive an Error.
+            if (signal?.aborted) throwCancellation(signal, error)
+            throw error
+          }
         },
       })
       editor.default.set("deepseek")
