@@ -41,6 +41,22 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - name: Verify NPM_TOKEN is set
+        if: ${{ inputs.dry_run != true }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::error::The NPM_TOKEN secret is empty. Set it to a granular npm token (Settings -> Secrets and variables -> Actions)."
+            exit 1
+          fi
+          case "$NODE_AUTH_TOKEN" in
+            npm_*) echo "NPM_TOKEN present (length ${#NODE_AUTH_TOKEN})" ;;
+            *)
+              echo "::error::NPM_TOKEN does not look like a granular npm token (expected it to start with 'npm_'); it looks like a placeholder."
+              exit 1
+              ;;
+          esac
       - name: Publish to npm
         if: ${{ inputs.dry_run != true }}
         env:
