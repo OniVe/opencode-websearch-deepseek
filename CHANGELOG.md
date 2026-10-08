@@ -17,13 +17,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `dedupeSources` drops non-string/empty URLs and merges duplicate URLs.
 - Release workflow runs `npm test` (build + test) instead of bare
   `node --test`, which failed because `dist/` is not committed.
+- `resolveMaxUses`/`resolveThinking` stay total for non-string input.
+- `execute` tolerates an omitted context object.
+- Cancellation is preserved when reading a non-2xx body (an `AbortError` is
+  no longer masked as an API error).
+- Reject an API key containing control characters before it reaches the
+  request headers.
 
 ### Changed
 
 - Send the system prompt as the top-level `system` field (Anthropic contract)
   instead of a `system` role inside `messages`.
-- Carry `citations[].cited_text` snippets into source `content`.
+- Read `citations[].cited_text` snippets into source `content` when present
+  (defensive; DeepSeek may not emit them).
 - `toResults` is total when `sources` is omitted.
+- Minimum supported Node.js is now 20 (`engines`), matching CI.
 
 ## [0.1.0] - 2026-10-07
 

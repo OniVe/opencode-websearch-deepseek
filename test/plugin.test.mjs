@@ -47,6 +47,9 @@ test("resolveMaxUses defaults to 5 and accepts a positive override", () => {
   assert.equal(resolveMaxUses("5.5"), DEFAULT_MAX_USES)
   assert.equal(resolveMaxUses("1e3"), DEFAULT_MAX_USES)
   assert.equal(resolveMaxUses("999999999999999999999999"), DEFAULT_MAX_USES)
+  // Non-string input is out of contract; the helper must stay total.
+  assert.equal(resolveMaxUses(42), DEFAULT_MAX_USES)
+  assert.equal(resolveMaxUses(null), DEFAULT_MAX_USES)
 })
 
 test("resolveThinking is enabled unless explicitly disabled", () => {
@@ -56,6 +59,8 @@ test("resolveThinking is enabled unless explicitly disabled", () => {
   assert.equal(resolveThinking("off"), "disabled")
   assert.equal(resolveThinking("false"), "disabled")
   assert.equal(resolveThinking("0"), "disabled")
+  assert.equal(resolveThinking(0), "enabled")
+  assert.equal(resolveThinking(null), "enabled")
 })
 
 test("buildRequestBody declares the search tool with max_uses", () => {
@@ -229,4 +234,29 @@ test("execute fails fast without an API key", async () => {
   delete process.env.DEEPSEEK_API_KEY
   delete process.env.WEBSEARCH_API_KEY
   await assert.rejects(() => provider.execute({ query: "hi" }, {}), /DEEPSEEK_API_KEY/)
+})
+
+test("execute is total when the context argument is omitted", async () => {
+  const provider = await register()
+  delete process.env.DEEPSEEK_API_KEY
+  delete process.env.WEBSEARCH_API_KEY
+  await assert.rejects(() => provider.execute({ query: "hi" }), /DEEPSEEK_API_KEY/)
+})
+
+test("execute rejects an API key with control characters", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "bad\nkey"
+  await assert.rejects(() => provider.execute({ query: "hi" }, {}), /invalid characters/)
+})
+
+test("execute surfaces a non-2xx body", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 500,
+    text: async () => "boom".repeat(200),
+    json: async () => ({}),
+  })
+  await assert.rejects(() => provider.execute({ query: "hi" }, {}), /DeepSeek API error 500: boom/)
 })

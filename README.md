@@ -69,6 +69,9 @@ in:
 | `WEBSEARCH_MAX_USES`| no       | `5`                | Max server-side searches per query (positive integer).             |
 | `WEBSEARCH_THINKING`| no       | `enabled`          | `enabled` or `disabled`; disables extended thinking when set to `disabled`. |
 
+> `WEBSEARCH_MODEL` is passed through as-is. DeepSeek maps unknown model names
+> to its default, so any server-side-search-capable DeepSeek model works.
+
 Once loaded, the provider becomes the default websearch provider, so the model
 can use the normal `websearch` tool without any extra configuration.
 

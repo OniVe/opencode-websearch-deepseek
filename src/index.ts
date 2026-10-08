@@ -127,7 +127,7 @@ function readEnv(name: string, env: NodeJS.ProcessEnv = process.env): string | u
  * Falls back to {@link DEFAULT_MAX_USES} for missing or invalid input.
  */
 export function resolveMaxUses(raw: string | undefined = process.env.WEBSEARCH_MAX_USES): number {
-  const value = (raw ?? "").trim()
+  const value = (typeof raw === "string" ? raw : "").trim()
   // Strict: only a plain positive integer. Rejects "1e3", "5.5", "5abc" and
   // values outside the safe-integer range (e.g. a 24-digit number).
   if (!/^\d+$/.test(value)) return DEFAULT_MAX_USES
@@ -142,7 +142,7 @@ export function resolveMaxUses(raw: string | undefined = process.env.WEBSEARCH_M
 export function resolveThinking(
   raw: string | undefined = process.env.WEBSEARCH_THINKING,
 ): "enabled" | "disabled" {
-  const value = (raw ?? "").trim().toLowerCase()
+  const value = (typeof raw === "string" ? raw : "").trim().toLowerCase()
   return value === "disabled" || value === "off" || value === "false" || value === "0"
     ? "disabled"
     : "enabled"
@@ -280,10 +280,13 @@ export const plugin = {
       editor.add({
         id: "deepseek",
         name: "DeepSeek Web Search",
-        execute: async ({ query }, { signal }) => {
+        execute: async ({ query }, { signal } = {}) => {
           const apiKey = readEnv("DEEPSEEK_API_KEY") ?? readEnv("WEBSEARCH_API_KEY")
           if (!apiKey) {
             throw new Error("DEEPSEEK_API_KEY is not set in the OpenCode environment")
+          }
+          if (!/^[\x21-\x7e]+$/.test(apiKey)) {
+            throw new Error("DEEPSEEK_API_KEY contains invalid characters")
           }
 
           const body = buildRequestBody(query, {
@@ -304,7 +307,11 @@ export const plugin = {
           })
 
           if (!response.ok) {
-            const text = await response.text().catch(() => "")
+            const text = await response.text().catch((error: unknown) => {
+              // Preserve cancellation: never turn an abort into an API error.
+              if (error instanceof Error && error.name === "AbortError") throw error
+              return ""
+            })
             throw new Error(`DeepSeek API error ${response.status}: ${text.slice(0, 300)}`)
           }
 
