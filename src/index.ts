@@ -183,10 +183,10 @@ export async function resolveApiKey(
     const connection = await integration.connection.active("deepseek")
     if (!connection) return undefined
     const credential = await integration.connection.resolve(connection)
-    const key = credential?.key
-    return typeof key === "string" && key.trim() ? key.trim() : undefined
-  } catch {
-    return undefined
+    return readString(credential?.key)
+  } catch (error) {
+    // A genuine integration failure is not "no key": surface it with context.
+    throw new Error("Failed to read the DeepSeek credential from OpenCode", { cause: error })
   }
 }
 
@@ -197,17 +197,41 @@ function readEnv(name: string, env: NodeJS.ProcessEnv = process.env): string | u
 }
 
 /**
- * Rethrow the cancellation reason from `signal`. `Error` and `DOMException`
- * (e.g. `AbortError`) are preserved as-is; other values (primitives) are
+ * Rethrow the cancellation reason from `signal`. `Error` and `AbortError`
+ * objects (e.g. `DOMException`) are preserved as-is; other reasons are
  * normalised to an `Error` so callers always receive one.
  */
 function throwCancellation(signal: AbortSignal, fallback: unknown): never {
-  const reason = signal.reason
+  const reason: unknown = signal.reason
   if (reason instanceof Error) throw reason
-  if (typeof reason === "object" && reason !== null) throw reason
-  if (reason !== undefined && reason !== null) throw new Error(String(reason))
+  if (typeof reason === "object" && reason !== null) {
+    // Preserve AbortError-like objects; wrap anything else.
+    if ((reason as { name?: unknown }).name === "AbortError") throw reason
+    throw new Error("The web search was aborted", { cause: reason })
+  }
+  if (reason !== undefined && reason !== null) {
+    const text = String(reason).trim()
+    if (text) throw new Error(text)
+  }
   if (fallback instanceof Error) throw fallback
   throw new Error("The web search was aborted")
+}
+
+/**
+ * Validate a `max_uses` value: a positive safe integer, given as a number or a
+ * plain-integer string. Returns `undefined` when unset or invalid.
+ */
+function pickMaxUses(value: unknown): number | undefined {
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value > 0 ? value : undefined
+  }
+  if (typeof value !== "string") return undefined
+  // Strict: only a plain positive integer. Rejects "1e3", "5.5", "5abc" and
+  // values outside the safe-integer range (e.g. a 24-digit number).
+  const trimmed = value.trim()
+  if (!/^\d+$/.test(trimmed)) return undefined
+  const parsed = Number(trimmed)
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined
 }
 
 /**
@@ -215,15 +239,23 @@ function throwCancellation(signal: AbortSignal, fallback: unknown): never {
  * Falls back to {@link DEFAULT_MAX_USES} for missing or invalid input.
  */
 export function resolveMaxUses(raw: string | number | undefined = process.env.WEBSEARCH_MAX_USES): number {
-  if (typeof raw === "number") {
-    return Number.isSafeInteger(raw) && raw > 0 ? raw : DEFAULT_MAX_USES
+  return pickMaxUses(raw) ?? DEFAULT_MAX_USES
+}
+
+/**
+ * Validate a thinking mode: only recognised `enabled`/`disabled` spellings
+ * count. Returns `undefined` when unset or unrecognised.
+ */
+function pickThinking(value: unknown): "enabled" | "disabled" | undefined {
+  if (typeof value !== "string") return undefined
+  const normalized = value.trim().toLowerCase()
+  if (normalized === "enabled" || normalized === "on" || normalized === "true" || normalized === "1") {
+    return "enabled"
   }
-  const value = (typeof raw === "string" ? raw : "").trim()
-  // Strict: only a plain positive integer. Rejects "1e3", "5.5", "5abc" and
-  // values outside the safe-integer range (e.g. a 24-digit number).
-  if (!/^\d+$/.test(value)) return DEFAULT_MAX_USES
-  const parsed = Number(value)
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_USES
+  if (normalized === "disabled" || normalized === "off" || normalized === "false" || normalized === "0") {
+    return "disabled"
+  }
+  return undefined
 }
 
 /**
@@ -233,10 +265,7 @@ export function resolveMaxUses(raw: string | number | undefined = process.env.WE
 export function resolveThinking(
   raw: string | undefined = process.env.WEBSEARCH_THINKING,
 ): "enabled" | "disabled" {
-  const value = (typeof raw === "string" ? raw : "").trim().toLowerCase()
-  return value === "disabled" || value === "off" || value === "false" || value === "0"
-    ? "disabled"
-    : "enabled"
+  return pickThinking(raw) ?? "enabled"
 }
 
 /** Build the JSON request body sent to the DeepSeek Messages endpoint. */
@@ -271,7 +300,7 @@ export function buildRequestBody(query: string, options: BuildRequestOptions): R
  */
 export function dedupeSources(sources: readonly DeepSeekSource[]): DeepSeekSource[] {
   const byUrl = new Map<string, DeepSeekSource>()
-  for (const source of sources) {
+  for (const source of Array.isArray(sources) ? sources : []) {
     if (typeof source?.url !== "string" || source.url.length === 0) continue
     const existing = byUrl.get(source.url)
     if (!existing) {
@@ -334,16 +363,19 @@ export function extractAnswerAndSources(data: DeepSeekResponse): {
  * present), followed by the individual sources.
  */
 export function toResults(answer: string, sources: readonly DeepSeekSource[] = []): WebSearchResult[] {
+  const valid = (Array.isArray(sources) ? sources : []).filter(
+    (source): source is DeepSeekSource => typeof source?.url === "string" && source.url.length > 0,
+  )
   const results: WebSearchResult[] = []
   if (answer) {
     results.push({
-      url: sources[0]?.url ?? FALLBACK_URL,
+      url: valid[0]?.url ?? FALLBACK_URL,
       title: "DeepSeek answer",
       content: answer,
       time: {},
     })
   }
-  for (const source of sources) {
+  for (const source of valid) {
     results.push({
       url: source.url,
       title: source.title || source.url,
@@ -373,7 +405,8 @@ export const plugin = {
       editor.add({
         id: "deepseek",
         name: "DeepSeek Web Search",
-        execute: async ({ query }, { signal } = {}) => {
+        execute: async ({ query }, context) => {
+          const signal = context?.signal
           const apiKey = await resolveApiKey(ctx, options)
           if (!apiKey) {
             throw new Error(
@@ -386,8 +419,9 @@ export const plugin = {
 
           const body = buildRequestBody(query, {
             model: readString(options.model) ?? readEnv("WEBSEARCH_MODEL") ?? DEFAULT_MODEL,
-            maxUses: resolveMaxUses(options.maxUses ?? readEnv("WEBSEARCH_MAX_USES")),
-            thinking: resolveThinking(readString(options.thinking) ?? readEnv("WEBSEARCH_THINKING")),
+            // Valid options win; an unset or invalid option falls back to env.
+            maxUses: pickMaxUses(options.maxUses) ?? resolveMaxUses(readEnv("WEBSEARCH_MAX_USES")),
+            thinking: pickThinking(options.thinking) ?? resolveThinking(readEnv("WEBSEARCH_THINKING")),
           })
 
           const response = await fetch(API_URL, {
@@ -406,7 +440,8 @@ export const plugin = {
               // Preserve cancellation: never turn an abort into an API error.
               if (signal?.aborted) return throwCancellation(signal, error)
               if ((error as { name?: string } | undefined)?.name === "AbortError") throw error
-              return ""
+              const detail = error instanceof Error ? error.message : String(error)
+              return `[body read failed: ${detail}]`
             })
             // An abort can also arrive after the body resolves; re-check so it
             // is not masked as an API error.

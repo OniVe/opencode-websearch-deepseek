@@ -466,3 +466,136 @@ test("plugin options configure key, model, max_uses, and thinking", async () => 
   assert.equal(body.tools[0].max_uses, 9)
   assert.equal("thinking" in body, false)
 })
+
+test("invalid options fall back to environment variables", async () => {
+  let captured
+  const fake = {
+    websearch: {
+      async transform(callback) {
+        callback({ add(provider) { captured = provider }, default: { set() {} } })
+      },
+    },
+    options: { model: "", maxUses: "abc", thinking: "garbage" },
+  }
+  await plugin.setup(fake)
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  process.env.WEBSEARCH_MODEL = "env-model"
+  process.env.WEBSEARCH_MAX_USES = "7"
+  process.env.WEBSEARCH_THINKING = "disabled"
+
+  let seen
+  globalThis.fetch = async (url, init) => {
+    seen = init
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ content: [{ type: "text", text: "ok" }] }),
+      text: async () => "",
+    }
+  }
+  await captured.execute({ query: "hi" }, {})
+  const body = JSON.parse(seen.body)
+  assert.equal(body.model, "env-model")
+  assert.equal(body.tools[0].max_uses, 7)
+  assert.equal("thinking" in body, false)
+  delete process.env.WEBSEARCH_MODEL
+  delete process.env.WEBSEARCH_MAX_USES
+  delete process.env.WEBSEARCH_THINKING
+})
+
+test("dedupeSources and toResults are total for hostile input", () => {
+  assert.deepEqual(dedupeSources(null), [])
+  assert.deepEqual(dedupeSources(undefined), [])
+
+  const results = toResults("a", [null, { url: "" }, { url: 5 }, { url: "https://x", title: "X" }])
+  assert.equal(results.length, 2)
+  assert.equal(results[0].title, "DeepSeek answer")
+  assert.equal(results[1].url, "https://x")
+})
+
+test("execute tolerates a null context", async () => {
+  const provider = await register()
+  delete process.env.DEEPSEEK_API_KEY
+  delete process.env.WEBSEARCH_API_KEY
+  await assert.rejects(() => provider.execute({ query: "hi" }, null), /DEEPSEEK_API_KEY/)
+})
+
+test("execute normalises a plain-object abort reason to an Error", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  const controller = new AbortController()
+  controller.abort({ code: 42 })
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 500,
+    text: async () => "body",
+    json: async () => ({}),
+  })
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, { signal: controller.signal }),
+    (error) => error instanceof Error && error.name !== "AbortError",
+  )
+})
+
+test("execute falls back to a message for an empty abort reason", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  const controller = new AbortController()
+  controller.abort("")
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 500,
+    text: async () => "body",
+    json: async () => ({}),
+  })
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, { signal: controller.signal }),
+    (error) => error instanceof Error && error.message === "The web search was aborted",
+  )
+})
+
+test("execute surfaces a credential lookup failure instead of 'no key'", async () => {
+  let captured
+  const fake = {
+    websearch: {
+      async transform(callback) {
+        callback({ add(provider) { captured = provider }, default: { set() {} } })
+      },
+    },
+    integration: {
+      connection: {
+        active: async () => {
+          throw new Error("integration down")
+        },
+        resolve: async () => undefined,
+      },
+    },
+  }
+  await plugin.setup(fake)
+  delete process.env.DEEPSEEK_API_KEY
+  delete process.env.WEBSEARCH_API_KEY
+  await assert.rejects(
+    () => captured.execute({ query: "hi" }, {}),
+    (error) =>
+      error instanceof Error &&
+      /Failed to read the DeepSeek credential/.test(error.message) &&
+      error.cause instanceof Error,
+  )
+})
+
+test("execute reports a non-2xx body read failure", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 502,
+    text: async () => {
+      throw new Error("socket hang up")
+    },
+    json: async () => ({}),
+  })
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, {}),
+    /body read failed: socket hang up/,
+  )
+})

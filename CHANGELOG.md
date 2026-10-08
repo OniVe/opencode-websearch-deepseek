@@ -28,7 +28,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Send the system prompt as the top-level `system` field (Anthropic contract)
   instead of a `system` role inside `messages`.
 - `toResults` is total when `sources` is omitted.
-- Minimum supported Node.js is 20 (`engines`), matching CI.
+- Minimum supported Node.js is 20 (`engines`), matching CI (raised to
+  22.14.0 in a later release).
 
 ### Fixed
 

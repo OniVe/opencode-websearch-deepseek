@@ -44,6 +44,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test",
+    "prepare": "npm run build",
     "prepack": "npm run build",
     "prepublishOnly": "npm run build && node --test",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
