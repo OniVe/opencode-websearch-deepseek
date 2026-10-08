@@ -313,6 +313,9 @@ export const plugin = {
               if ((error as { name?: string } | undefined)?.name === "AbortError") throw error
               return ""
             })
+            // An abort can also arrive after the body resolves; re-check so it
+            // is not masked as an API error.
+            if (signal?.aborted) throw signal.reason ?? new Error("The web search was aborted")
             throw new Error(`DeepSeek API error ${response.status}: ${text.slice(0, 300)}`)
           }
 

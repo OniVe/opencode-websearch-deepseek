@@ -301,3 +301,21 @@ test("execute preserves a custom abort reason on a non-2xx body", async () => {
     /custom cancel/,
   )
 })
+
+test("execute preserves cancellation when the non-2xx body resolves after abort", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  const controller = new AbortController()
+  const reason = new Error("late cancel")
+  controller.abort(reason)
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 503,
+    text: async () => "partial body",
+    json: async () => ({}),
+  })
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, { signal: controller.signal }),
+    /late cancel/,
+  )
+})
