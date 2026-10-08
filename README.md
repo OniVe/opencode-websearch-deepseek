@@ -18,7 +18,7 @@ source URLs it was based on.
 - **OpenCode 2.x** with the V2 plugin API (the `plugins` config field). The
   OpenCode 1.x plugin loader expects the legacy `server()` export and will not
   load this plugin.
-- Node.js 20+ (for `fetch`; OpenCode's runtime already provides it).
+- Node.js 22.14+ (for `fetch`; OpenCode's runtime already provides it).
 - A DeepSeek API key.
 
 ## Install
@@ -87,6 +87,15 @@ can use the normal `websearch` tool without any extra configuration.
 3. DeepSeek searches, then writes a synthesized answer.
 4. The plugin returns that answer plus the de-duplicated source URLs as
    `WebSearch.Result` entries.
+
+## Releases
+
+Releases are automated with [`semantic-release`](https://semantic-release.gitbook.io/)
+from [Conventional Commits](https://www.conventionalcommits.org/) merged to
+`main`: `fix:` → patch, `feat:` → minor, and breaking changes → minor while
+`< 1.0.0`. It publishes to npm via trusted publishing (OIDC) with provenance,
+then tags the commit and creates a GitHub Release. See
+[CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## Development
 

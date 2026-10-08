@@ -1,0 +1,31 @@
+name: Commitlint
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  commitlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci
+      - name: Lint commit messages
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            FROM="${{ github.event.pull_request.base.sha }}"
+            TO="${{ github.event.pull_request.head.sha }}"
+          else
+            FROM="${{ github.event.before }}"
+            TO="${{ github.sha }}"
+            if [ -z "$FROM" ] || [ "$FROM" = "0000000000000000000000000000000000000000" ]; then
+              FROM="$(git rev-list --max-parents=0 "$TO" | tail -n 1)"
+            fi
+          fi
+          npx commitlint --from "$FROM" --to "$TO" --verbose
