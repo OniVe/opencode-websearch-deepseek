@@ -169,6 +169,7 @@ function readString(value: unknown): string | undefined {
 export async function resolveApiKey(
   ctx: WebsearchContext,
   options?: WebsearchOptions,
+  signal?: AbortSignal,
 ): Promise<string | undefined> {
   const fromOptions = readString(options?.apiKey)
   if (fromOptions) return fromOptions
@@ -180,11 +181,12 @@ export async function resolveApiKey(
   if (!integration) return undefined
 
   try {
-    const connection = await integration.connection.active("deepseek")
+    const connection = await withAbort(integration.connection.active("deepseek"), signal)
     if (!connection) return undefined
-    const credential = await integration.connection.resolve(connection)
+    const credential = await withAbort(integration.connection.resolve(connection), signal)
     return readString(credential?.key)
   } catch (error) {
+    if (signal?.aborted) throwCancellation(signal, error)
     // A genuine integration failure is not "no key": surface it with context.
     throw new Error("Failed to read the DeepSeek credential from OpenCode", { cause: error })
   }
@@ -207,15 +209,38 @@ function throwCancellation(signal: AbortSignal, fallback: unknown): never {
   if (typeof reason === "object" && reason !== null) {
     // Preserve AbortError-like objects (DOMException has a message); wrap the rest.
     const candidate = reason as { name?: unknown; message?: unknown }
-    if (candidate.name === "AbortError" && typeof candidate.message === "string") throw reason
+    if (candidate.name === "AbortError" && typeof candidate.message === "string" && candidate.message) {
+      throw reason
+    }
     throw new Error("The web search was aborted", { cause: reason })
   }
+  if (typeof reason === "string" && reason.trim()) throw new Error(reason.trim())
   if (reason !== undefined && reason !== null) {
-    const text = String(reason).trim()
-    if (text) throw new Error(text)
+    // Non-string primitives (e.g. 0) are not useful messages; keep them as cause.
+    throw new Error("The web search was aborted", { cause: reason })
   }
   if (fallback instanceof Error) throw fallback
   throw new Error("The web search was aborted")
+}
+
+/** Reject with the signal's reason if `signal` aborts before `promise` settles. */
+function withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise
+  if (signal.aborted) return Promise.reject(signal.reason ?? new Error("The web search was aborted"))
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason ?? new Error("The web search was aborted"))
+    signal.addEventListener("abort", onAbort, { once: true })
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort)
+        resolve(value)
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort)
+        reject(error)
+      },
+    )
+  })
 }
 
 /**
@@ -369,6 +394,8 @@ export function toResults(answer: string, sources: readonly DeepSeekSource[] = [
   )
   const results: WebSearchResult[] = []
   if (answer) {
+    // The synthesized answer reuses the first source's URL so it links to a
+    // real page; the same source is also listed below (intentional).
     results.push({
       url: valid[0]?.url ?? FALLBACK_URL,
       title: "DeepSeek answer",
@@ -409,7 +436,7 @@ export const plugin = {
         execute: async ({ query }, context) => {
           const signal = context?.signal
           try {
-            const apiKey = await resolveApiKey(ctx, options)
+            const apiKey = await resolveApiKey(ctx, options, signal)
             if (!apiKey) {
               throw new Error(
                 "No DeepSeek API key: set the DEEPSEEK_API_KEY env var, pass the apiKey plugin option, or sign in to the deepseek provider in OpenCode",
@@ -452,6 +479,8 @@ export const plugin = {
             }
 
             const data = (await response.json()) as DeepSeekResponse
+            // A cancellation may arrive after the response completed.
+            if (signal?.aborted) throwCancellation(signal, undefined)
             const { answer, sources } = extractAnswerAndSources(data)
             return toResults(answer, sources)
           } catch (error) {

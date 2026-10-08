@@ -633,3 +633,72 @@ test("execute normalises a raw abort reason from response.json", async () => {
     (error) => error instanceof Error && error.message === "The web search was aborted",
   )
 })
+
+test("execute checks cancellation before returning results", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  const controller = new AbortController()
+  controller.abort(new Error("stop-now"))
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => "",
+    json: async () => ({ content: [{ type: "text", text: "ok" }] }),
+  })
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, { signal: controller.signal }),
+    /stop-now/,
+  )
+})
+
+test("execute uses a fallback message for a non-string abort reason", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  const controller = new AbortController()
+  controller.abort(0)
+  globalThis.fetch = async () => {
+    throw 0
+  }
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, { signal: controller.signal }),
+    (error) => error instanceof Error && error.message === "The web search was aborted",
+  )
+})
+
+test("execute wraps an AbortError-like object without a message", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  const controller = new AbortController()
+  controller.abort({ name: "AbortError", message: "" })
+  globalThis.fetch = async () => {
+    throw { name: "AbortError", message: "" }
+  }
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, { signal: controller.signal }),
+    (error) => error instanceof Error && error.name !== "AbortError",
+  )
+})
+
+test("execute cancels while resolving the stored credential", async () => {
+  let captured
+  const fake = {
+    websearch: {
+      async transform(callback) {
+        callback({ add(provider) { captured = provider }, default: { set() {} } })
+      },
+    },
+    integration: {
+      connection: {
+        active: () => new Promise(() => {}),
+        resolve: async () => undefined,
+      },
+    },
+  }
+  await plugin.setup(fake)
+  delete process.env.DEEPSEEK_API_KEY
+  delete process.env.WEBSEARCH_API_KEY
+  const controller = new AbortController()
+  const promise = captured.execute({ query: "hi" }, { signal: controller.signal })
+  controller.abort("cancel-cred")
+  await assert.rejects(promise, /cancel-cred/)
+})
