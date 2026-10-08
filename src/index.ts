@@ -207,10 +207,15 @@ function throwCancellation(signal: AbortSignal, fallback: unknown): never {
   const reason: unknown = signal.reason
   if (reason instanceof Error) throw reason
   if (typeof reason === "object" && reason !== null) {
-    // Preserve AbortError-like objects (DOMException has a message); wrap the rest.
-    const candidate = reason as { name?: unknown; message?: unknown }
-    if (candidate.name === "AbortError" && typeof candidate.message === "string" && candidate.message) {
-      throw reason
+    // Preserve AbortError-like objects (DOMException has a message); wrap the
+    // rest. Guard the property reads: a hostile reason may throw from a getter.
+    try {
+      const candidate = reason as { name?: unknown; message?: unknown }
+      if (candidate.name === "AbortError" && typeof candidate.message === "string" && candidate.message) {
+        throw reason
+      }
+    } catch (error) {
+      if (error === reason) throw error
     }
     throw new Error("The web search was aborted", { cause: reason })
   }
@@ -226,7 +231,12 @@ function throwCancellation(signal: AbortSignal, fallback: unknown): never {
 /** Reject with the signal's reason if `signal` aborts before `promise` settles. */
 function withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return promise
-  if (signal.aborted) return Promise.reject(signal.reason ?? new Error("The web search was aborted"))
+  if (signal.aborted) {
+    // The passed promise is already created; swallow its later rejection so it
+    // does not surface as an unhandled rejection.
+    promise.catch(() => {})
+    return Promise.reject(signal.reason ?? new Error("The web search was aborted"))
+  }
   return new Promise<T>((resolve, reject) => {
     const onAbort = () => reject(signal.reason ?? new Error("The web search was aborted"))
     signal.addEventListener("abort", onAbort, { once: true })

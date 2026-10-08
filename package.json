@@ -44,7 +44,8 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test",
-    "prepare": "node -e \"try{require.resolve('typescript')}catch{process.exit(0)};require('node:child_process').execSync('npm run build',{stdio:'inherit'})\"",
+    "prepare": "node -e \"const fs=require('node:fs');if(fs.existsSync('dist/index.js'))process.exit(0);try{require.resolve('typescript')}catch{process.exit(0)};require('node:child_process').execSync('npm run build',{stdio:'inherit'})\"",
+    "prepack": "npm run build",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
   },
   "devDependencies": {

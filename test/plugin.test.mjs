@@ -702,3 +702,49 @@ test("execute cancels while resolving the stored credential", async () => {
   controller.abort("cancel-cred")
   await assert.rejects(promise, /cancel-cred/)
 })
+
+test("execute does not leak a rejection when the credential lookup fails after abort", async () => {
+  let captured
+  const fake = {
+    websearch: {
+      async transform(callback) {
+        callback({ add(provider) { captured = provider }, default: { set() {} } })
+      },
+    },
+    integration: {
+      connection: {
+        active: () => Promise.reject(new Error("active-boom")),
+        resolve: async () => undefined,
+      },
+    },
+  }
+  await plugin.setup(fake)
+  delete process.env.DEEPSEEK_API_KEY
+  delete process.env.WEBSEARCH_API_KEY
+  const controller = new AbortController()
+  controller.abort("cancel-pre")
+  await assert.rejects(
+    () => captured.execute({ query: "hi" }, { signal: controller.signal }),
+    /cancel-pre/,
+  )
+})
+
+test("execute tolerates a hostile abort reason getter", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  const reason = {}
+  Object.defineProperty(reason, "name", {
+    get() {
+      throw new Error("hostile")
+    },
+  })
+  const controller = new AbortController()
+  controller.abort(reason)
+  globalThis.fetch = async () => {
+    throw reason
+  }
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, { signal: controller.signal }),
+    (error) => error instanceof Error && error.message === "The web search was aborted",
+  )
+})

@@ -31,8 +31,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- `npm pack` builds first via `prepack` (previously packing without a build
-  emitted a broken tarball with no `dist/`).
+- `npm pack` builds the package first (so the tarball includes `dist/`).
 - `extractAnswerAndSources` no longer throws on a non-array `content`; it
   degrades to an empty result.
 - `resolveMaxUses` accepts only a plain positive integer (rejects `1e3`,
