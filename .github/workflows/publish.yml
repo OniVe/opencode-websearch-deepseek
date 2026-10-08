@@ -1,29 +1,63 @@
-name: Publish
+name: Publish (bootstrap)
+
+# One-time bootstrap for the very first npm release.
+#
+# 1. Publishes the version in package.json to npm using the NPM_TOKEN secret.
+# 2. Creates the matching git tag and a GitHub release.
+#
+# After 0.1.0 is live and npm trusted publishing is configured for
+# `.github/workflows/release.yml`, this workflow is removed and all later
+# releases are handled by semantic-release.
+#
+# Requires the `NPM_TOKEN` repository secret: a granular access token with
+# read + write access to packages.
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Run everything except npm publish, tagging, and release
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-bootstrap
+  cancel-in-progress: false
 
 jobs:
-  npm:
+  bootstrap:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
       - run: npm ci
       - run: npm run typecheck
-      # `npm test` builds first (dist/ is gitignored and absent after npm ci).
       - run: npm test
-        env:
-          # tests mock fetch, no real key is needed
-          DEEPSEEK_API_KEY: ""
-      - run: npm publish --provenance --access public
+      - name: Publish to npm
+        if: ${{ inputs.dry_run != true }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          VERSION="$(node -p 'require("./package.json").version')"
+          if npm view "opencode-websearch-deepseek@${VERSION}" version >/dev/null 2>&1; then
+            echo "::error::opencode-websearch-deepseek@${VERSION} is already published"
+            exit 1
+          fi
+          npm publish --access public
+      - name: Tag and release
+        if: ${{ inputs.dry_run != true }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="$(node -p 'require("./package.json").version')"
+          git tag "v${VERSION}"
+          git push origin "v${VERSION}"
+          gh release create "v${VERSION}" --verify-tag --title "v${VERSION}" --generate-notes
