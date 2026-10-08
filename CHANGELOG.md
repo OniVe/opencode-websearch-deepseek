@@ -19,8 +19,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `node --test`, which failed because `dist/` is not committed.
 - `resolveMaxUses`/`resolveThinking` stay total for non-string input.
 - `execute` tolerates an omitted context object.
-- Cancellation is preserved when reading a non-2xx body (an `AbortError` is
-  no longer masked as an API error).
+- Cancellation is preserved when reading a non-2xx body (an `AbortError`, or a
+  custom `abort(reason)`, is no longer masked as an API error).
 - Reject an API key containing control characters before it reaches the
   request headers.
 

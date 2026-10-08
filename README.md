@@ -18,7 +18,7 @@ source URLs it was based on.
 - **OpenCode 2.x** with the V2 plugin API (the `plugins` config field). The
   OpenCode 1.x plugin loader expects the legacy `server()` export and will not
   load this plugin.
-- Node.js 18+ (for `fetch`; OpenCode's runtime already provides it).
+- Node.js 20+ (for `fetch`; OpenCode's runtime already provides it).
 - A DeepSeek API key.
 
 ## Install
@@ -71,6 +71,10 @@ in:
 
 > `WEBSEARCH_MODEL` is passed through as-is. DeepSeek maps unknown model names
 > to its default, so any server-side-search-capable DeepSeek model works.
+
+> The plugin always selects the DeepSeek provider. Without an API key, a
+> `websearch` call fails with a clear error rather than silently falling back
+> to a different provider.
 
 Once loaded, the provider becomes the default websearch provider, so the model
 can use the normal `websearch` tool without any extra configuration.

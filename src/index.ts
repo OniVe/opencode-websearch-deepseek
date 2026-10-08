@@ -286,7 +286,7 @@ export const plugin = {
             throw new Error("DEEPSEEK_API_KEY is not set in the OpenCode environment")
           }
           if (!/^[\x21-\x7e]+$/.test(apiKey)) {
-            throw new Error("DEEPSEEK_API_KEY contains invalid characters")
+            throw new Error("The API key contains invalid characters")
           }
 
           const body = buildRequestBody(query, {
@@ -309,7 +309,8 @@ export const plugin = {
           if (!response.ok) {
             const text = await response.text().catch((error: unknown) => {
               // Preserve cancellation: never turn an abort into an API error.
-              if (error instanceof Error && error.name === "AbortError") throw error
+              if (signal?.aborted) throw signal.reason ?? error
+              if ((error as { name?: string } | undefined)?.name === "AbortError") throw error
               return ""
             })
             throw new Error(`DeepSeek API error ${response.status}: ${text.slice(0, 300)}`)

@@ -260,3 +260,44 @@ test("execute surfaces a non-2xx body", async () => {
   })
   await assert.rejects(() => provider.execute({ query: "hi" }, {}), /DeepSeek API error 500: boom/)
 })
+
+test("execute preserves an AbortError on a non-2xx body", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  const abortError = new Error("aborted")
+  abortError.name = "AbortError"
+  const controller = new AbortController()
+  controller.abort(abortError)
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 500,
+    text: async () => {
+      throw abortError
+    },
+    json: async () => ({}),
+  })
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, { signal: controller.signal }),
+    (error) => error?.name === "AbortError",
+  )
+})
+
+test("execute preserves a custom abort reason on a non-2xx body", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  const controller = new AbortController()
+  const reason = new Error("custom cancel")
+  controller.abort(reason)
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 500,
+    text: async () => {
+      throw reason
+    },
+    json: async () => ({}),
+  })
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, { signal: controller.signal }),
+    /custom cancel/,
+  )
+})
