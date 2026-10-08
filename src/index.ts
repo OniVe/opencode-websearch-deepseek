@@ -123,6 +123,20 @@ function readEnv(name: string, env: NodeJS.ProcessEnv = process.env): string | u
 }
 
 /**
+ * Rethrow the cancellation reason from `signal`. `Error` and `DOMException`
+ * (e.g. `AbortError`) are preserved as-is; other values (primitives) are
+ * normalised to an `Error` so callers always receive one.
+ */
+function throwCancellation(signal: AbortSignal, fallback: unknown): never {
+  const reason = signal.reason
+  if (reason instanceof Error) throw reason
+  if (typeof reason === "object" && reason !== null) throw reason
+  if (reason !== undefined && reason !== null) throw new Error(String(reason))
+  if (fallback instanceof Error) throw fallback
+  throw new Error("The web search was aborted")
+}
+
+/**
  * Resolve the `max_uses` value for the search tool declaration.
  * Falls back to {@link DEFAULT_MAX_USES} for missing or invalid input.
  */
@@ -309,13 +323,13 @@ export const plugin = {
           if (!response.ok) {
             const text = await response.text().catch((error: unknown) => {
               // Preserve cancellation: never turn an abort into an API error.
-              if (signal?.aborted) throw signal.reason ?? error
+              if (signal?.aborted) return throwCancellation(signal, error)
               if ((error as { name?: string } | undefined)?.name === "AbortError") throw error
               return ""
             })
             // An abort can also arrive after the body resolves; re-check so it
             // is not masked as an API error.
-            if (signal?.aborted) throw signal.reason ?? new Error("The web search was aborted")
+            if (signal?.aborted) throwCancellation(signal, undefined)
             throw new Error(`DeepSeek API error ${response.status}: ${text.slice(0, 300)}`)
           }
 

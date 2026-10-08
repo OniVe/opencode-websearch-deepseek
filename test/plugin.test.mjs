@@ -319,3 +319,39 @@ test("execute preserves cancellation when the non-2xx body resolves after abort"
     /late cancel/,
   )
 })
+
+test("execute preserves an AbortError from the body read when the signal is not aborted", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  const abortError = new Error("aborted while reading")
+  abortError.name = "AbortError"
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 500,
+    text: async () => {
+      throw abortError
+    },
+    json: async () => ({}),
+  })
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, {}),
+    (error) => error?.name === "AbortError",
+  )
+})
+
+test("execute normalises a primitive abort reason to an Error", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  const controller = new AbortController()
+  controller.abort("cancel-string")
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 500,
+    text: async () => "body",
+    json: async () => ({}),
+  })
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, { signal: controller.signal }),
+    (error) => error instanceof Error && /cancel-string/.test(error.message),
+  )
+})
