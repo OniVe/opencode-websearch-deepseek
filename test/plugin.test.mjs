@@ -355,3 +355,77 @@ test("execute normalises a primitive abort reason to an Error", async () => {
     (error) => error instanceof Error && /cancel-string/.test(error.message),
   )
 })
+
+test("execute reuses the stored DeepSeek credential when no env key is set", async () => {
+  let captured
+  const fake = {
+    websearch: {
+      async transform(callback) {
+        callback({ add(provider) { captured = provider }, default: { set() {} } })
+      },
+    },
+    integration: {
+      connection: {
+        active: async (id) => (id === "deepseek" ? { type: "credential", id: "cred_1" } : undefined),
+        resolve: async () => ({ type: "api", key: "sk-stored-key" }),
+      },
+    },
+  }
+  await plugin.setup(fake)
+  delete process.env.DEEPSEEK_API_KEY
+  delete process.env.WEBSEARCH_API_KEY
+
+  let seen
+  globalThis.fetch = async (url, init) => {
+    seen = init
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ content: [{ type: "text", text: "stored ok" }] }),
+      text: async () => "",
+    }
+  }
+  const results = await captured.execute({ query: "hi" }, {})
+  assert.equal(seen.headers["x-api-key"], "sk-stored-key")
+  assert.equal(results[0].content, "stored ok")
+})
+
+test("environment key takes precedence over the stored credential", async () => {
+  let captured
+  let resolveCalls = 0
+  const fake = {
+    websearch: {
+      async transform(callback) {
+        callback({ add(provider) { captured = provider }, default: { set() {} } })
+      },
+    },
+    integration: {
+      connection: {
+        active: async () => {
+          resolveCalls++
+          return { type: "credential" }
+        },
+        resolve: async () => {
+          resolveCalls++
+          return { key: "sk-stored" }
+        },
+      },
+    },
+  }
+  await plugin.setup(fake)
+  process.env.DEEPSEEK_API_KEY = "sk-env"
+
+  let seen
+  globalThis.fetch = async (url, init) => {
+    seen = init
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ content: [{ type: "text", text: "env ok" }] }),
+      text: async () => "",
+    }
+  }
+  await captured.execute({ query: "hi" }, {})
+  assert.equal(seen.headers["x-api-key"], "sk-env")
+  assert.equal(resolveCalls, 0)
+})

@@ -109,10 +109,49 @@ interface WebsearchEditor {
   }
 }
 
+/** A credential returned by OpenCode for a configured provider. */
+export interface StoredCredential {
+  type?: string
+  key?: string
+}
+
+/** Minimal slice of OpenCode's integration API used to read a stored provider key. */
+export interface IntegrationContext {
+  connection: {
+    active(integrationID: string): Promise<unknown>
+    resolve(connection: unknown): Promise<StoredCredential | undefined>
+  }
+}
+
 /** Context passed to the plugin's `setup`. */
 export interface WebsearchContext {
   websearch: {
     transform(callback: (editor: WebsearchEditor) => void): Promise<unknown> | unknown
+  }
+  /** Present in OpenCode 2.x; used to reuse the DeepSeek provider credential. */
+  integration?: IntegrationContext
+}
+
+/**
+ * Resolve the DeepSeek API key. An explicit environment variable takes
+ * precedence; otherwise the key OpenCode stores for the `deepseek` provider
+ * (configured via `opencode auth login`) is used.
+ */
+export async function resolveApiKey(ctx: WebsearchContext): Promise<string | undefined> {
+  const fromEnv = readEnv("DEEPSEEK_API_KEY") ?? readEnv("WEBSEARCH_API_KEY")
+  if (fromEnv) return fromEnv
+
+  const integration = ctx.integration
+  if (!integration) return undefined
+
+  try {
+    const connection = await integration.connection.active("deepseek")
+    if (!connection) return undefined
+    const credential = await integration.connection.resolve(connection)
+    const key = credential?.key
+    return typeof key === "string" && key.trim() ? key.trim() : undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -295,9 +334,11 @@ export const plugin = {
         id: "deepseek",
         name: "DeepSeek Web Search",
         execute: async ({ query }, { signal } = {}) => {
-          const apiKey = readEnv("DEEPSEEK_API_KEY") ?? readEnv("WEBSEARCH_API_KEY")
+          const apiKey = await resolveApiKey(ctx)
           if (!apiKey) {
-            throw new Error("DEEPSEEK_API_KEY is not set in the OpenCode environment")
+            throw new Error(
+              "DEEPSEEK_API_KEY is not set and no stored DeepSeek credential was found; set the env var or sign in to the deepseek provider in OpenCode",
+            )
           }
           if (!/^[\x21-\x7e]+$/.test(apiKey)) {
             throw new Error("The API key contains invalid characters")

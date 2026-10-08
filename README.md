@@ -63,14 +63,19 @@ in:
 
 | Variable            | Required | Default            | Description                                                        |
 | ------------------- | -------- | ------------------ | ------------------------------------------------------------------ |
-| `DEEPSEEK_API_KEY`  | yes      | —                  | DeepSeek API key.                                                  |
-| `WEBSEARCH_API_KEY` | no       | —                  | Fallback key used when `DEEPSEEK_API_KEY` is not set.              |
+| `DEEPSEEK_API_KEY`  | no\*     | —                  | DeepSeek API key (takes precedence over the stored credential).    |
+| `WEBSEARCH_API_KEY` | no       | —                  | Fallback env key used when `DEEPSEEK_API_KEY` is not set.          |
 | `WEBSEARCH_MODEL`   | no       | `deepseek-v4-flash`| Model used for search and synthesis.                               |
 | `WEBSEARCH_MAX_USES`| no       | `5`                | Max server-side searches per query (positive integer).             |
 | `WEBSEARCH_THINKING`| no       | `enabled`          | `enabled` or `disabled`; disables extended thinking when set to `disabled`. |
 
 > `WEBSEARCH_MODEL` is passed through as-is. DeepSeek maps unknown model names
 > to its default, so any server-side-search-capable DeepSeek model works.
+
+> \* If no environment key is set, the plugin reuses the API key OpenCode
+> stores for the `deepseek` provider (for example after `opencode auth login`),
+> so no environment variable is required when that provider is already
+> authenticated.
 
 > The plugin always selects the DeepSeek provider. Without an API key, a
 > `websearch` call fails with a clear error rather than silently falling back
