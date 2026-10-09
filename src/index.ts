@@ -1,30 +1,31 @@
 /**
  * opencode-websearch-deepseek
  *
- * A DeepSeek-powered web search provider for OpenCode's built-in `websearch`
- * tool. It registers through the OpenCode V2 plugin API
- * (`ctx.websearch.transform`) as a native search provider — no MCP server
- * required.
+ * A web search provider for OpenCode's built-in `websearch` tool, speaking the
+ * Anthropic Messages protocol with the server-side `web_search_20250305` tool.
+ * It registers through the OpenCode V2 plugin API (`ctx.websearch.transform`)
+ * — no MCP server required — and additionally exposes the same search to Code
+ * Mode as the `tools.websearch.search(...)` tool when the runtime supports it.
  *
- * Queries are answered by DeepSeek's Anthropic-compatible Messages API using
- * the server-side `web_search_20250305` tool. The provider returns a
- * synthesized answer plus the source URLs it was based on.
+ * DeepSeek is the default provider (its Anthropic-compatible endpoint emulates
+ * the same protocol); any Anthropic-compatible endpoint can be selected.
  *
  * Environment:
- *   DEEPSEEK_API_KEY     (required)  DeepSeek API key.
- *   WEBSEARCH_API_KEY    (optional)  Generic fallback API key.
- *   WEBSEARCH_MODEL      (optional)  Model override, defaults to "deepseek-v4-flash".
- *   WEBSEARCH_MAX_USES   (optional)  Max server-side searches per query, defaults to 5.
- *   WEBSEARCH_THINKING   (optional)  "enabled" (default) or "disabled".
+ *   DEEPSEEK_API_KEY     DeepSeek API key (default provider).
+ *   ANTHROPIC_API_KEY    Anthropic API key (provider "anthropic").
+ *   WEBSEARCH_API_KEY    Generic fallback API key.
+ *   WEBSEARCH_MODEL      Model override.
+ *   WEBSEARCH_MAX_USES   Max server-side searches per query, defaults to 5.
+ *   WEBSEARCH_THINKING   "enabled" (default) or "disabled".
  */
 
 /** Default DeepSeek model used for search + synthesis. */
 export const DEFAULT_MODEL = "deepseek-v4-flash"
 
-/** Default number of server-side searches DeepSeek may run per query. */
+/** Default number of server-side searches the model may run per query. */
 export const DEFAULT_MAX_USES = 5
 
-/** Anthropic API version header required by the DeepSeek compatibility layer. */
+/** Anthropic API version header required by the compatibility layer. */
 export const ANTHROPIC_VERSION = "2023-06-01"
 
 /** DeepSeek Anthropic-compatible Messages endpoint. */
@@ -33,11 +34,45 @@ export const API_URL = "https://api.deepseek.com/anthropic/v1/messages"
 /** Fallback URL used when a result has no source of its own. */
 export const FALLBACK_URL = "https://api.deepseek.com"
 
-/** Server-side web search tool type understood by the DeepSeek API. */
+/** Server-side web search tool type. */
 export const WEB_SEARCH_TOOL_TYPE = "web_search_20250305"
 
+/** Provider used when the `provider` option is not set. */
+export const DEFAULT_PROVIDER = "deepseek"
+
+/** A provider preset: endpoint, credential sources, and default model. */
+export interface ProviderPreset {
+  /** Full URL of the Anthropic-compatible Messages endpoint. */
+  endpoint: string
+  /** Environment variables checked for the API key, in order. */
+  keyEnv: string[]
+  /** OpenCode integration id used to resolve a stored credential. */
+  integrationID: string
+  /** Default model when none is configured. */
+  defaultModel?: string
+}
+
 /**
- * System prompt that keeps DeepSeek from emitting tool-call XML or looping on
+ * Built-in Anthropic-compatible providers. `options.baseUrl` overrides the
+ * endpoint; `options.provider` may name any provider id (resolved through its
+ * OpenCode integration).
+ */
+export const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
+  deepseek: {
+    endpoint: API_URL,
+    keyEnv: ["DEEPSEEK_API_KEY", "WEBSEARCH_API_KEY"],
+    integrationID: "deepseek",
+    defaultModel: DEFAULT_MODEL,
+  },
+  anthropic: {
+    endpoint: "https://api.anthropic.com/v1/messages",
+    keyEnv: ["ANTHROPIC_API_KEY", "WEBSEARCH_API_KEY"],
+    integrationID: "anthropic",
+  },
+}
+
+/**
+ * System prompt that keeps the model from emitting tool-call XML or looping on
  * further searches, and makes it answer in the user's language.
  */
 export const SYSTEM_PROMPT = [
@@ -62,7 +97,7 @@ export interface WebSearchResult {
   time: Record<string, unknown>
 }
 
-/** A source URL reported by DeepSeek's server-side search. */
+/** A source URL reported by the server-side search. */
 export interface DeepSeekSource {
   url: string
   title?: string
@@ -79,14 +114,14 @@ export interface BuildRequestOptions {
   system?: string
 }
 
-/** Minimal shape of a content block in a DeepSeek Anthropic-style response. */
+/** Minimal shape of a content block in an Anthropic-style response. */
 interface ResponseBlock {
   type?: string
   text?: string
   content?: unknown
 }
 
-/** Minimal shape of a DeepSeek Anthropic-style Messages response. */
+/** Minimal shape of an Anthropic-style Messages response. */
 export interface DeepSeekResponse {
   content?: ResponseBlock[]
   [key: string]: unknown
@@ -123,18 +158,44 @@ export interface IntegrationContext {
   }
 }
 
+/** Minimal slice of OpenCode's model API used to read the configured default. */
+export interface ModelInfo {
+  providerID?: string
+  modelID?: string
+  id?: string
+}
+
+export interface ModelContext {
+  default?(): Promise<unknown>
+}
+
+/** Minimal slice of OpenCode's tool API used to expose the Code Mode tool. */
+export interface ToolEditor {
+  namespace(input: { name: string; description: string }): void
+  add(tool: Record<string, unknown>): void
+}
+
+export interface ToolContext {
+  transform?(callback: (editor: ToolEditor) => void): Promise<unknown> | unknown
+}
+
 /**
  * Options accepted through the `plugins` object form in `opencode.json(c)` and
  * forwarded to the plugin via `ctx.options`:
  *
  * ```jsonc
  * { "plugins": [{ "package": "opencode-websearch-deepseek", "options": {
- *   "apiKey": "...", "model": "deepseek-v4-flash", "maxUses": 5, "thinking": "enabled"
+ *   "provider": "deepseek", "apiKey": "...", "model": "deepseek-v4-flash",
+ *   "maxUses": 5, "thinking": "enabled"
  * } }] }
  * ```
  */
 export interface WebsearchOptions {
-  /** DeepSeek API key; takes precedence over env and the stored credential. */
+  /** Provider preset (`deepseek`, `anthropic`) or any OpenCode integration id. */
+  provider?: string
+  /** Full Messages endpoint URL; overrides the preset. */
+  baseUrl?: string
+  /** API key; takes precedence over env and the stored credential. */
   apiKey?: string
   /** Model used for search and synthesis. */
   model?: string
@@ -151,8 +212,12 @@ export interface WebsearchContext {
   }
   /** Plugin options from the `plugins` object form. */
   options?: Record<string, unknown>
-  /** Present in OpenCode 2.x; used to reuse the DeepSeek provider credential. */
+  /** Present in OpenCode 2.x; used to reuse a provider credential. */
   integration?: IntegrationContext
+  /** Present in OpenCode 2.x; used to read the configured default model. */
+  model?: ModelContext
+  /** Present in OpenCode 2.x; used to register the Code Mode tool. */
+  tool?: ToolContext
 }
 
 /** Return a trimmed non-empty string, or undefined for any other value. */
@@ -160,11 +225,38 @@ function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined
 }
 
+/** Resolve the configured provider id. */
+export function resolveProvider(options?: WebsearchOptions): string {
+  return readString(options?.provider) ?? DEFAULT_PROVIDER
+}
+
+/** Resolve the Messages endpoint for the configured provider. */
+export function resolveEndpoint(options?: WebsearchOptions): string {
+  const override = readString(options?.baseUrl)
+  if (override) return override
+  const provider = resolveProvider(options)
+  const preset = PROVIDER_PRESETS[provider]
+  if (preset) return preset.endpoint
+  throw new Error(`Unknown provider "${provider}": set the baseUrl plugin option to its /v1/messages URL`)
+}
+
+/** Human-readable name for the websearch provider entry. */
+function providerDisplay(provider: string): string {
+  if (provider === "deepseek") return "DeepSeek Web Search"
+  if (provider === "anthropic") return "Anthropic Web Search"
+  return `${provider} Web Search`
+}
+
+/** Read an environment variable, treating blank strings as unset. */
+function readEnv(name: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const value = env[name]
+  return value && value.trim() ? value.trim() : undefined
+}
+
 /**
- * Resolve the DeepSeek API key, in order of precedence: the `apiKey` plugin
- * option, then the `DEEPSEEK_API_KEY`/`WEBSEARCH_API_KEY` environment
- * variables, then the credential OpenCode stores for the `deepseek` provider
- * (configured via `opencode auth login`).
+ * Resolve the API key, in order of precedence: the `apiKey` plugin option, the
+ * provider's environment variables, then the credential OpenCode stores for the
+ * provider's integration (configured via `opencode auth login`).
  */
 export async function resolveApiKey(
   ctx: WebsearchContext,
@@ -174,28 +266,59 @@ export async function resolveApiKey(
   const fromOptions = readString(options?.apiKey)
   if (fromOptions) return fromOptions
 
-  const fromEnv = readEnv("DEEPSEEK_API_KEY") ?? readEnv("WEBSEARCH_API_KEY")
-  if (fromEnv) return fromEnv
+  const provider = resolveProvider(options)
+  const preset = PROVIDER_PRESETS[provider]
+  for (const name of preset?.keyEnv ?? ["WEBSEARCH_API_KEY"]) {
+    const value = readEnv(name)
+    if (value) return value
+  }
 
   const integration = ctx.integration
   if (!integration) return undefined
+  const integrationID = preset?.integrationID ?? provider
 
   try {
-    const connection = await withAbort(integration.connection.active("deepseek"), signal)
+    const connection = await withAbort(integration.connection.active(integrationID), signal)
     if (!connection) return undefined
     const credential = await withAbort(integration.connection.resolve(connection), signal)
     return readString(credential?.key)
   } catch (error) {
     if (signal?.aborted) throwCancellation(signal, error)
     // A genuine integration failure is not "no key": surface it with context.
-    throw new Error("Failed to read the DeepSeek credential from OpenCode", { cause: error })
+    throw new Error(`Failed to read the ${integrationID} credential from OpenCode`, { cause: error })
   }
 }
 
-/** Read an environment variable, treating blank strings as unset. */
-function readEnv(name: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
-  const value = env[name]
-  return value && value.trim() ? value.trim() : undefined
+/**
+ * Resolve the model once, in order of precedence: the `model` option, the
+ * `WEBSEARCH_MODEL` env var, the configured default model when it belongs to
+ * the same provider, then the provider preset default.
+ */
+export async function resolveModel(
+  ctx: WebsearchContext,
+  options?: WebsearchOptions,
+): Promise<string | undefined> {
+  const fromOptions = readString(options?.model)
+  if (fromOptions) return fromOptions
+
+  const fromEnv = readEnv("WEBSEARCH_MODEL")
+  if (fromEnv) return fromEnv
+
+  const provider = resolveProvider(options)
+  try {
+    const result = await ctx.model?.default?.()
+    const info = ((result as { data?: ModelInfo } | undefined)?.data ?? (result as ModelInfo | undefined)) as
+      | ModelInfo
+      | undefined
+    if (info && info.providerID === provider) {
+      const id = readString(info.modelID) ?? readString(info.id)
+      if (id) return id
+    }
+  } catch {
+    // Ignore; fall through to the preset default.
+  }
+
+  return PROVIDER_PRESETS[provider]?.defaultModel
 }
 
 /**
@@ -304,7 +427,7 @@ export function resolveThinking(
   return pickThinking(raw) ?? "enabled"
 }
 
-/** Build the JSON request body sent to the DeepSeek Messages endpoint. */
+/** Build the JSON request body sent to the Messages endpoint. */
 export function buildRequestBody(query: string, options: BuildRequestOptions): Record<string, unknown> {
   const tool: Record<string, unknown> = {
     type: WEB_SEARCH_TOOL_TYPE,
@@ -350,8 +473,8 @@ export function dedupeSources(sources: readonly DeepSeekSource[]): DeepSeekSourc
 }
 
 /**
- * Split a DeepSeek response into a synthesized answer and its source URLs.
- * Sources reported by multiple search rounds are de-duplicated by URL.
+ * Split a response into a synthesized answer and its source URLs. Sources
+ * reported by multiple search rounds are de-duplicated by URL.
  */
 export function extractAnswerAndSources(data: DeepSeekResponse): {
   answer: string
@@ -408,7 +531,7 @@ export function toResults(answer: string, sources: readonly DeepSeekSource[] = [
     // real page; the same source is also listed below (intentional).
     results.push({
       url: valid[0]?.url ?? FALLBACK_URL,
-      title: "DeepSeek answer",
+      title: "Web search answer",
       content: answer,
       time: {},
     })
@@ -424,12 +547,91 @@ export function toResults(answer: string, sources: readonly DeepSeekSource[] = [
   if (results.length === 0) {
     results.push({
       url: FALLBACK_URL,
-      title: "DeepSeek web search",
+      title: "Web search",
       content: "The search returned no results.",
       time: {},
     })
   }
   return results
+}
+
+/** Textual form of a search result, for the non-Code-Mode (native) context. */
+export function toContent(answer: string, sources: readonly DeepSeekSource[]): string {
+  const valid = (Array.isArray(sources) ? sources : []).filter(
+    (source): source is DeepSeekSource => typeof source?.url === "string" && source.url.length > 0,
+  )
+  if (valid.length === 0) return answer
+  const lines = valid.map((source) => `- ${source.title || source.url} — ${source.url}`)
+  return `${answer}\n\nSources:\n${lines.join("\n")}`
+}
+
+/**
+ * Run one search through the configured provider. Shared by the websearch
+ * provider and the Code Mode tool so both always behave identically.
+ */
+export async function searchDeepSeek(
+  ctx: WebsearchContext,
+  options: WebsearchOptions,
+  model: string | undefined,
+  query: string,
+  signal?: AbortSignal,
+): Promise<{ answer: string; sources: DeepSeekSource[] }> {
+  const provider = resolveProvider(options)
+  try {
+    const apiKey = await resolveApiKey(ctx, options, signal)
+    if (!apiKey) {
+      throw new Error(
+        `No API key for provider "${provider}": set its environment variable, pass the apiKey plugin option, or sign in to the "${provider}" provider in OpenCode`,
+      )
+    }
+    if (!/^[\x21-\x7e]+$/.test(apiKey)) {
+      throw new Error("The API key contains invalid characters")
+    }
+    if (!model) {
+      throw new Error(`No model for provider "${provider}": set the model plugin option or WEBSEARCH_MODEL`)
+    }
+
+    const body = buildRequestBody(query, {
+      model,
+      maxUses: pickMaxUses(options.maxUses) ?? resolveMaxUses(readEnv("WEBSEARCH_MAX_USES")),
+      thinking: pickThinking(options.thinking) ?? resolveThinking(readEnv("WEBSEARCH_THINKING")),
+    })
+
+    const response = await fetch(resolveEndpoint(options), {
+      method: "POST",
+      signal,
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": ANTHROPIC_VERSION,
+      },
+      body: JSON.stringify(body),
+    })
+
+    if (!response.ok) {
+      const text = await response.text().catch((error: unknown) => {
+        // Preserve cancellation: never turn an abort into an API error.
+        if (signal?.aborted) return throwCancellation(signal, error)
+        if ((error as { name?: string } | undefined)?.name === "AbortError") throw error
+        const detail = error instanceof Error ? error.message : String(error)
+        return `[body read failed: ${detail}]`
+      })
+      // An abort can also arrive after the body resolves; re-check so it is
+      // not masked as an API error.
+      if (signal?.aborted) throwCancellation(signal, undefined)
+      throw new Error(`Web search API error ${response.status}: ${text.slice(0, 300)}`)
+    }
+
+    const data = (await response.json()) as DeepSeekResponse
+    // A cancellation may arrive after the response completed.
+    if (signal?.aborted) throwCancellation(signal, undefined)
+    return extractAnswerAndSources(data)
+  } catch (error) {
+    // `fetch`/`json` reject with the raw signal reason; normalise any
+    // cancellation so callers always receive an Error.
+    if (signal?.aborted) throwCancellation(signal, error)
+    throw error
+  }
 }
 
 /** OpenCode plugin definition. */
@@ -438,71 +640,67 @@ export const plugin = {
 
   async setup(ctx: WebsearchContext): Promise<void> {
     const options = (ctx.options ?? {}) as WebsearchOptions
+    const provider = resolveProvider(options)
+    const model = await resolveModel(ctx, options)
 
     await ctx.websearch.transform((editor) => {
       editor.add({
-        id: "deepseek",
-        name: "DeepSeek Web Search",
+        id: provider,
+        name: providerDisplay(provider),
         execute: async ({ query }, context) => {
-          const signal = context?.signal
-          try {
-            const apiKey = await resolveApiKey(ctx, options, signal)
-            if (!apiKey) {
-              throw new Error(
-                "No DeepSeek API key: set the DEEPSEEK_API_KEY env var, pass the apiKey plugin option, or sign in to the deepseek provider in OpenCode",
-              )
-            }
-            if (!/^[\x21-\x7e]+$/.test(apiKey)) {
-              throw new Error("The API key contains invalid characters")
-            }
-
-            const body = buildRequestBody(query, {
-              model: readString(options.model) ?? readEnv("WEBSEARCH_MODEL") ?? DEFAULT_MODEL,
-              // Valid options win; an unset or invalid option falls back to env.
-              maxUses: pickMaxUses(options.maxUses) ?? resolveMaxUses(readEnv("WEBSEARCH_MAX_USES")),
-              thinking: pickThinking(options.thinking) ?? resolveThinking(readEnv("WEBSEARCH_THINKING")),
-            })
-
-            const response = await fetch(API_URL, {
-              method: "POST",
-              signal,
-              headers: {
-                "content-type": "application/json",
-                "x-api-key": apiKey,
-                "anthropic-version": ANTHROPIC_VERSION,
-              },
-              body: JSON.stringify(body),
-            })
-
-            if (!response.ok) {
-              const text = await response.text().catch((error: unknown) => {
-                // Preserve cancellation: never turn an abort into an API error.
-                if (signal?.aborted) return throwCancellation(signal, error)
-                if ((error as { name?: string } | undefined)?.name === "AbortError") throw error
-                const detail = error instanceof Error ? error.message : String(error)
-                return `[body read failed: ${detail}]`
-              })
-              // An abort can also arrive after the body resolves; re-check so it
-              // is not masked as an API error.
-              if (signal?.aborted) throwCancellation(signal, undefined)
-              throw new Error(`DeepSeek API error ${response.status}: ${text.slice(0, 300)}`)
-            }
-
-            const data = (await response.json()) as DeepSeekResponse
-            // A cancellation may arrive after the response completed.
-            if (signal?.aborted) throwCancellation(signal, undefined)
-            const { answer, sources } = extractAnswerAndSources(data)
-            return toResults(answer, sources)
-          } catch (error) {
-            // `fetch`/`json` reject with the raw signal reason; normalise any
-            // cancellation so callers always receive an Error.
-            if (signal?.aborted) throwCancellation(signal, error)
-            throw error
-          }
+          const { answer, sources } = await searchDeepSeek(ctx, options, model, query, context?.signal)
+          return toResults(answer, sources)
         },
       })
-      editor.default.set("deepseek")
+      editor.default.set(provider)
     })
+
+    // Expose the same search to Code Mode when the runtime supports tools.
+    const tool = ctx.tool
+    if (tool && typeof tool.transform === "function") {
+      try {
+        await tool.transform((editor) => {
+          editor.namespace({ name: "websearch", description: "Web search" })
+          editor.add({
+            name: "search",
+            description: "Search the web. Returns a synthesized answer with source URLs.",
+            input: {
+              type: "object",
+              properties: { query: { type: "string", minLength: 1, description: "Search query" } },
+              required: ["query"],
+              additionalProperties: false,
+            },
+            output: {
+              type: "object",
+              properties: {
+                answer: { type: "string" },
+                sources: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      url: { type: "string" },
+                      title: { type: "string" },
+                      content: { type: "string" },
+                    },
+                    required: ["url", "title"],
+                  },
+                },
+              },
+              required: ["answer", "sources"],
+            },
+            options: { namespace: "websearch", codemode: true, pinned: true, permission: "websearch" },
+            execute: async (input: { query?: unknown }, context: { signal?: AbortSignal }) => {
+              const query = typeof input?.query === "string" ? input.query : ""
+              const { answer, sources } = await searchDeepSeek(ctx, options, model, query, context?.signal)
+              return { output: { answer, sources }, content: toContent(answer, sources) }
+            },
+          })
+        })
+      } catch {
+        // Tool registration is best effort; the websearch provider still works.
+      }
+    }
   },
 }
 

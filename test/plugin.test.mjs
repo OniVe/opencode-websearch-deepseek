@@ -5,16 +5,23 @@ import plugin, {
   ANTHROPIC_VERSION,
   API_URL,
   DEFAULT_MAX_USES,
+  DEFAULT_PROVIDER,
+  PROVIDER_PRESETS,
   buildRequestBody,
   dedupeSources,
   extractAnswerAndSources,
+  resolveApiKey,
+  resolveEndpoint,
   resolveMaxUses,
+  resolveModel,
+  resolveProvider,
   resolveThinking,
   toResults,
 } from "../dist/index.js"
 
 const ENV_KEYS = [
   "DEEPSEEK_API_KEY",
+  "ANTHROPIC_API_KEY",
   "WEBSEARCH_API_KEY",
   "WEBSEARCH_MODEL",
   "WEBSEARCH_MAX_USES",
@@ -141,12 +148,12 @@ test("toResults returns the answer first, then sources, and never empty", () => 
   const results = toResults("answer", [{ url: "https://a", title: "A" }])
   assert.equal(results.length, 2)
   assert.equal(results[0].url, "https://a")
-  assert.equal(results[0].title, "DeepSeek answer")
+  assert.equal(results[0].title, "Web search answer")
   assert.equal(results[0].content, "answer")
 
   const empty = toResults("", [])
   assert.equal(empty.length, 1)
-  assert.equal(empty[0].title, "DeepSeek web search")
+  assert.equal(empty[0].title, "Web search")
 
   // `sources` is optional; toResults must stay total when called directly.
   assert.equal(toResults("answer").length, 1)
@@ -235,14 +242,14 @@ test("execute fails fast without an API key", async () => {
   const provider = await register()
   delete process.env.DEEPSEEK_API_KEY
   delete process.env.WEBSEARCH_API_KEY
-  await assert.rejects(() => provider.execute({ query: "hi" }, {}), /DEEPSEEK_API_KEY/)
+  await assert.rejects(() => provider.execute({ query: "hi" }, {}), /No API key/)
 })
 
 test("execute is total when the context argument is omitted", async () => {
   const provider = await register()
   delete process.env.DEEPSEEK_API_KEY
   delete process.env.WEBSEARCH_API_KEY
-  await assert.rejects(() => provider.execute({ query: "hi" }), /DEEPSEEK_API_KEY/)
+  await assert.rejects(() => provider.execute({ query: "hi" }), /No API key/)
 })
 
 test("execute rejects an API key with control characters", async () => {
@@ -260,7 +267,7 @@ test("execute surfaces a non-2xx body", async () => {
     text: async () => "boom".repeat(200),
     json: async () => ({}),
   })
-  await assert.rejects(() => provider.execute({ query: "hi" }, {}), /DeepSeek API error 500: boom/)
+  await assert.rejects(() => provider.execute({ query: "hi" }, {}), /Web search API error 500: boom/)
 })
 
 test("execute preserves an AbortError on a non-2xx body", async () => {
@@ -477,9 +484,9 @@ test("invalid options fall back to environment variables", async () => {
     },
     options: { model: "", maxUses: "abc", thinking: "garbage" },
   }
+  process.env.WEBSEARCH_MODEL = "env-model"
   await plugin.setup(fake)
   process.env.DEEPSEEK_API_KEY = "test-key"
-  process.env.WEBSEARCH_MODEL = "env-model"
   process.env.WEBSEARCH_MAX_USES = "7"
   process.env.WEBSEARCH_THINKING = "disabled"
 
@@ -509,7 +516,7 @@ test("dedupeSources and toResults are total for hostile input", () => {
 
   const results = toResults("a", [null, { url: "" }, { url: 5 }, { url: "https://x", title: "X" }])
   assert.equal(results.length, 2)
-  assert.equal(results[0].title, "DeepSeek answer")
+  assert.equal(results[0].title, "Web search answer")
   assert.equal(results[1].url, "https://x")
 })
 
@@ -517,7 +524,7 @@ test("execute tolerates a null context", async () => {
   const provider = await register()
   delete process.env.DEEPSEEK_API_KEY
   delete process.env.WEBSEARCH_API_KEY
-  await assert.rejects(() => provider.execute({ query: "hi" }, null), /DEEPSEEK_API_KEY/)
+  await assert.rejects(() => provider.execute({ query: "hi" }, null), /No API key/)
 })
 
 test("execute normalises a plain-object abort reason to an Error", async () => {
@@ -578,7 +585,7 @@ test("execute surfaces a credential lookup failure instead of 'no key'", async (
     () => captured.execute({ query: "hi" }, {}),
     (error) =>
       error instanceof Error &&
-      /Failed to read the DeepSeek credential/.test(error.message) &&
+      /Failed to read the deepseek credential/.test(error.message) &&
       error.cause instanceof Error,
   )
 })
@@ -747,4 +754,121 @@ test("execute tolerates a hostile abort reason getter", async () => {
     () => provider.execute({ query: "hi" }, { signal: controller.signal }),
     (error) => error instanceof Error && error.message === "The web search was aborted",
   )
+})
+
+test("resolveProvider defaults to deepseek", () => {
+  assert.equal(resolveProvider({}), DEFAULT_PROVIDER)
+  assert.equal(resolveProvider({ provider: "anthropic" }), "anthropic")
+  assert.equal(resolveProvider({ provider: "  " }), DEFAULT_PROVIDER)
+})
+
+test("resolveEndpoint maps providers and honours baseUrl", () => {
+  assert.equal(resolveEndpoint({ provider: "deepseek" }), API_URL)
+  assert.equal(resolveEndpoint({}), API_URL)
+  assert.equal(resolveEndpoint({ provider: "anthropic" }), "https://api.anthropic.com/v1/messages")
+  assert.equal(resolveEndpoint({ provider: "anthropic", baseUrl: "http://x/v1/messages" }), "http://x/v1/messages")
+  assert.throws(() => resolveEndpoint({ provider: "custom" }), /baseUrl/)
+})
+
+test("PROVIDER_PRESETS exposes deepseek and anthropic", () => {
+  assert.equal(PROVIDER_PRESETS.deepseek.endpoint, API_URL)
+  assert.equal(PROVIDER_PRESETS.deepseek.defaultModel, "deepseek-v4-flash")
+  assert.equal(PROVIDER_PRESETS.anthropic.integrationID, "anthropic")
+})
+
+test("resolveApiKey reads ANTHROPIC_API_KEY for the anthropic provider", async () => {
+  delete process.env.DEEPSEEK_API_KEY
+  process.env.ANTHROPIC_API_KEY = "sk-ant-test"
+  const key = await resolveApiKey({ websearch: { transform() {} } }, { provider: "anthropic" })
+  assert.equal(key, "sk-ant-test")
+})
+
+test("resolveModel prefers options, then env, then the provider preset", async () => {
+  const ctx = { websearch: { transform() {} } }
+  assert.equal(await resolveModel(ctx, { model: "opt-model" }), "opt-model")
+  process.env.WEBSEARCH_MODEL = "env-model"
+  assert.equal(await resolveModel(ctx, {}), "env-model")
+  delete process.env.WEBSEARCH_MODEL
+  assert.equal(await resolveModel(ctx, {}), "deepseek-v4-flash")
+  assert.equal(await resolveModel(ctx, { provider: "anthropic" }), undefined)
+})
+
+test("resolveModel uses the configured default only for the same provider", async () => {
+  const same = {
+    websearch: { transform() {} },
+    model: { async default() { return { data: { providerID: "deepseek", modelID: "deepseek-flash" } } } },
+  }
+  assert.equal(await resolveModel(same, {}), "deepseek-flash")
+
+  const other = {
+    websearch: { transform() {} },
+    model: { async default() { return { data: { providerID: "opencode", modelID: "exo-free" } } } },
+  }
+  assert.equal(await resolveModel(other, {}), "deepseek-v4-flash")
+})
+
+test("setup registers the Code Mode tool", async () => {
+  let namespaced
+  const added = []
+  const fake = {
+    websearch: { async transform(callback) { callback({ add() {}, default: { set() {} } }) } },
+    tool: {
+      async transform(callback) {
+        callback({ namespace(n) { namespaced = n }, add(t) { added.push(t) } })
+      },
+    },
+  }
+  await plugin.setup(fake)
+  assert.equal(namespaced?.name, "websearch")
+  assert.equal(added.length, 1)
+  assert.equal(added[0].name, "search")
+  assert.deepEqual(added[0].options, {
+    namespace: "websearch",
+    codemode: true,
+    pinned: true,
+    permission: "websearch",
+  })
+  assert.deepEqual(added[0].input.required, ["query"])
+  assert.ok(added[0].output)
+})
+
+test("Code Mode tool returns structured output and text content", async () => {
+  let toolDef
+  const fake = {
+    websearch: { async transform(callback) { callback({ add() {}, default: { set() {} } }) } },
+    tool: { async transform(callback) { callback({ namespace() {}, add(t) { toolDef = t } }) } },
+  }
+  await plugin.setup(fake)
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => "",
+    json: async () => ({
+      content: [
+        { type: "text", text: "the answer" },
+        {
+          type: "web_search_tool_result",
+          content: [{ type: "web_search_result", url: "https://a", title: "A" }],
+        },
+      ],
+    }),
+  })
+
+  const result = await toolDef.execute({ query: "hi" }, {})
+  assert.equal(result.output.answer, "the answer")
+  assert.equal(result.output.sources[0].url, "https://a")
+  assert.match(result.content, /the answer/)
+  assert.match(result.content, /Sources:/)
+  assert.match(result.content, /https:\/\/a/)
+})
+
+test("setup works without the tool domain", async () => {
+  let captured
+  const fake = {
+    websearch: { async transform(callback) { callback({ add(p) { captured = p }, default: { set() {} } }) } },
+  }
+  await plugin.setup(fake)
+  assert.ok(captured)
+  assert.equal(captured.id, "deepseek")
 })
