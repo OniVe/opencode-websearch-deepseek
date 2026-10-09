@@ -872,3 +872,36 @@ test("setup works without the tool domain", async () => {
   assert.ok(captured)
   assert.equal(captured.id, "deepseek")
 })
+
+test("resolveEndpoint rejects prototype-chain provider names", () => {
+  for (const provider of ["__proto__", "constructor", "toString"]) {
+    assert.throws(() => resolveEndpoint({ provider }), /Unknown provider/)
+  }
+})
+
+test("resolveEndpoint rejects a non-http baseUrl", () => {
+  assert.throws(() => resolveEndpoint({ baseUrl: "ftp://x/v1/messages" }), /Invalid baseUrl/)
+  assert.throws(() => resolveEndpoint({ baseUrl: "javascript:alert(1)" }), /Invalid baseUrl/)
+})
+
+test("Code Mode tool normalises title for citation-only sources", async () => {
+  let toolDef
+  const fake = {
+    websearch: { async transform(callback) { callback({ add() {}, default: { set() {} } }) } },
+    tool: { async transform(callback) { callback({ namespace() {}, add(t) { toolDef = t } }) } },
+  }
+  await plugin.setup(fake)
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => "",
+    json: async () => ({
+      content: [{ type: "text", text: "ans", citations: [{ url: "https://c", cited_text: "q" }] }],
+    }),
+  })
+  const result = await toolDef.execute({ query: "hi" }, {})
+  assert.equal(result.output.sources[0].url, "https://c")
+  assert.equal(result.output.sources[0].title, "https://c")
+  assert.equal(result.output.sources[0].content, "q")
+})

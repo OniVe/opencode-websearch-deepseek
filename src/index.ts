@@ -71,6 +71,13 @@ export const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
   },
 }
 
+/** Look up a preset by own key only (never the prototype chain). */
+function getPreset(provider: string): ProviderPreset | undefined {
+  return Object.prototype.hasOwnProperty.call(PROVIDER_PRESETS, provider)
+    ? (PROVIDER_PRESETS[provider] as ProviderPreset)
+    : undefined
+}
+
 /**
  * System prompt that keeps the model from emitting tool-call XML or looping on
  * further searches, and makes it answer in the user's language.
@@ -233,9 +240,14 @@ export function resolveProvider(options?: WebsearchOptions): string {
 /** Resolve the Messages endpoint for the configured provider. */
 export function resolveEndpoint(options?: WebsearchOptions): string {
   const override = readString(options?.baseUrl)
-  if (override) return override
+  if (override) {
+    if (!/^https?:\/\//i.test(override)) {
+      throw new Error(`Invalid baseUrl "${override}": expected an http(s) URL`)
+    }
+    return override
+  }
   const provider = resolveProvider(options)
-  const preset = PROVIDER_PRESETS[provider]
+  const preset = getPreset(provider)
   if (preset) return preset.endpoint
   throw new Error(`Unknown provider "${provider}": set the baseUrl plugin option to its /v1/messages URL`)
 }
@@ -267,7 +279,7 @@ export async function resolveApiKey(
   if (fromOptions) return fromOptions
 
   const provider = resolveProvider(options)
-  const preset = PROVIDER_PRESETS[provider]
+  const preset = getPreset(provider)
   for (const name of preset?.keyEnv ?? ["WEBSEARCH_API_KEY"]) {
     const value = readEnv(name)
     if (value) return value
@@ -318,7 +330,7 @@ export async function resolveModel(
     // Ignore; fall through to the preset default.
   }
 
-  return PROVIDER_PRESETS[provider]?.defaultModel
+  return getPreset(provider)?.defaultModel
 }
 
 /**
@@ -352,8 +364,7 @@ function throwCancellation(signal: AbortSignal, fallback: unknown): never {
 }
 
 /** Reject with the signal's reason if `signal` aborts before `promise` settles. */
-function withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
-  if (!signal) return promise
+function withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {  if (!signal) return promise
   if (signal.aborted) {
     // The passed promise is already created; swallow its later rejection so it
     // does not surface as an unhandled rejection.
@@ -374,6 +385,21 @@ function withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
       },
     )
   })
+}
+
+/** Resolve `promise`, or `undefined` if it does not settle within `ms`. */
+async function raceTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), ms)
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
 }
 
 /**
@@ -565,6 +591,15 @@ export function toContent(answer: string, sources: readonly DeepSeekSource[]): s
   return `${answer}\n\nSources:\n${lines.join("\n")}`
 }
 
+/** Normalise sources into the structured output shape (title defaults to url). */
+export function toSourceObjects(
+  sources: readonly DeepSeekSource[],
+): Array<{ url: string; title: string; content: string }> {
+  return (Array.isArray(sources) ? sources : [])
+    .filter((source): source is DeepSeekSource => typeof source?.url === "string" && source.url.length > 0)
+    .map((source) => ({ url: source.url, title: source.title || source.url, content: source.content ?? "" }))
+}
+
 /**
  * Run one search through the configured provider. Shared by the websearch
  * provider and the Code Mode tool so both always behave identically.
@@ -641,7 +676,9 @@ export const plugin = {
   async setup(ctx: WebsearchContext): Promise<void> {
     const options = (ctx.options ?? {}) as WebsearchOptions
     const provider = resolveProvider(options)
-    const model = await resolveModel(ctx, options)
+    // The model is resolved once; bound the wait so a stuck model API cannot
+    // block plugin setup.
+    const model = await raceTimeout(resolveModel(ctx, options), 2000)
 
     await ctx.websearch.transform((editor) => {
       editor.add({
@@ -693,7 +730,7 @@ export const plugin = {
             execute: async (input: { query?: unknown }, context: { signal?: AbortSignal }) => {
               const query = typeof input?.query === "string" ? input.query : ""
               const { answer, sources } = await searchDeepSeek(ctx, options, model, query, context?.signal)
-              return { output: { answer, sources }, content: toContent(answer, sources) }
+              return { output: { answer, sources: toSourceObjects(sources) }, content: toContent(answer, sources) }
             },
           })
         })
