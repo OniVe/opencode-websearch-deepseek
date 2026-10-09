@@ -905,3 +905,15 @@ test("Code Mode tool normalises title for citation-only sources", async () => {
   assert.equal(result.output.sources[0].title, "https://c")
   assert.equal(result.output.sources[0].content, "q")
 })
+
+test("Code Mode tool rejects an empty query", async () => {
+  let toolDef
+  const fake = {
+    websearch: { async transform(callback) { callback({ add() {}, default: { set() {} } }) } },
+    tool: { async transform(callback) { callback({ namespace() {}, add(t) { toolDef = t } }) } },
+  }
+  await plugin.setup(fake)
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  await assert.rejects(() => toolDef.execute({ query: "   " }, {}), /non-empty/)
+  await assert.rejects(() => toolDef.execute({}, {}), /non-empty/)
+})

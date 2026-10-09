@@ -364,7 +364,8 @@ function throwCancellation(signal: AbortSignal, fallback: unknown): never {
 }
 
 /** Reject with the signal's reason if `signal` aborts before `promise` settles. */
-function withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {  if (!signal) return promise
+function withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise
   if (signal.aborted) {
     // The passed promise is already created; swallow its later rejection so it
     // does not surface as an unhandled rejection.
@@ -677,8 +678,8 @@ export const plugin = {
     const options = (ctx.options ?? {}) as WebsearchOptions
     const provider = resolveProvider(options)
     // The model is resolved once; bound the wait so a stuck model API cannot
-    // block plugin setup.
-    const model = await raceTimeout(resolveModel(ctx, options), 2000)
+    // block plugin setup, and fall back to the provider preset if it times out.
+    const model = (await raceTimeout(resolveModel(ctx, options), 2000)) ?? getPreset(provider)?.defaultModel
 
     await ctx.websearch.transform((editor) => {
       editor.add({
@@ -728,7 +729,8 @@ export const plugin = {
             },
             options: { namespace: "websearch", codemode: true, pinned: true, permission: "websearch" },
             execute: async (input: { query?: unknown }, context: { signal?: AbortSignal }) => {
-              const query = typeof input?.query === "string" ? input.query : ""
+              const query = typeof input?.query === "string" ? input.query.trim() : ""
+              if (!query) throw new Error("query must be a non-empty string")
               const { answer, sources } = await searchDeepSeek(ctx, options, model, query, context?.signal)
               return { output: { answer, sources: toSourceObjects(sources) }, content: toContent(answer, sources) }
             },

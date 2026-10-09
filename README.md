@@ -173,10 +173,10 @@ npm test            # builds, then runs node --test
 ```
 
 The plugin is a thin wrapper: pure helpers (`buildRequestBody`, `dedupeSources`,
-`extractAnswerAndSources`, `toResults`, `toContent`, `resolveApiKey`,
-`resolveEndpoint`, `resolveModel`, `resolveProvider`, `resolveMaxUses`,
-`resolveThinking`) are exported separately and covered by unit tests with a
-mocked `fetch`.
+`extractAnswerAndSources`, `toResults`, `toContent`, `toSourceObjects`,
+`resolveApiKey`, `resolveEndpoint`, `resolveModel`, `resolveProvider`,
+`resolveMaxUses`, `resolveThinking`) are exported separately and covered by unit
+tests with a mocked `fetch`.
 
 ### Verify a local package
 
@@ -186,7 +186,7 @@ Build a tarball and install it into a scratch config:
 npm pack
 mkdir scratch && cd scratch
 npm init -y
-npm install ../opencode-websearch-deepseek-0.4.0.tgz
+npm install ../opencode-websearch-deepseek-*.tgz
 ```
 
 Then point `opencode.jsonc` in that directory at the package and restart
