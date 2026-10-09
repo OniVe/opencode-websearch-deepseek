@@ -16,6 +16,7 @@ import plugin, {
   resolveModel,
   resolveProvider,
   resolveThinking,
+  toContent,
   toResults,
 } from "../dist/index.js"
 
@@ -916,4 +917,26 @@ test("Code Mode tool rejects an empty query", async () => {
   process.env.DEEPSEEK_API_KEY = "test-key"
   await assert.rejects(() => toolDef.execute({ query: "   " }, {}), /non-empty/)
   await assert.rejects(() => toolDef.execute({}, {}), /non-empty/)
+})
+
+test("search rejects an empty query on the provider path too", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  await assert.rejects(() => provider.execute({ query: "   " }, {}), /non-empty/)
+})
+
+test("unknown provider without baseUrl fails before the model check", async () => {
+  let captured
+  const fake = {
+    websearch: { async transform(callback) { callback({ add(p) { captured = p }, default: { set() {} } }) } },
+    options: { provider: "custom-provider", apiKey: "k", model: "m" },
+  }
+  await plugin.setup(fake)
+  await assert.rejects(() => captured.execute({ query: "hi" }, {}), /Unknown provider/)
+})
+
+test("toContent omits the leading blank line when the answer is empty", () => {
+  const content = toContent("", [{ url: "https://a", title: "A" }])
+  assert.match(content, /^Sources:/)
+  assert.match(content, /https:\/\/a/)
 })

@@ -589,7 +589,8 @@ export function toContent(answer: string, sources: readonly DeepSeekSource[]): s
   )
   if (valid.length === 0) return answer
   const lines = valid.map((source) => `- ${source.title || source.url} — ${source.url}`)
-  return `${answer}\n\nSources:\n${lines.join("\n")}`
+  const prefix = answer ? `${answer}\n\n` : ""
+  return `${prefix}Sources:\n${lines.join("\n")}`
 }
 
 /** Normalise sources into the structured output shape (title defaults to url). */
@@ -613,7 +614,11 @@ export async function searchDeepSeek(
   signal?: AbortSignal,
 ): Promise<{ answer: string; sources: DeepSeekSource[] }> {
   const provider = resolveProvider(options)
+  const trimmedQuery = typeof query === "string" ? query.trim() : ""
   try {
+    if (!trimmedQuery) throw new Error("query must be a non-empty string")
+    // Resolve the endpoint first so an unknown provider fails before key/model.
+    const endpoint = resolveEndpoint(options)
     const apiKey = await resolveApiKey(ctx, options, signal)
     if (!apiKey) {
       throw new Error(
@@ -627,13 +632,13 @@ export async function searchDeepSeek(
       throw new Error(`No model for provider "${provider}": set the model plugin option or WEBSEARCH_MODEL`)
     }
 
-    const body = buildRequestBody(query, {
+    const body = buildRequestBody(trimmedQuery, {
       model,
       maxUses: pickMaxUses(options.maxUses) ?? resolveMaxUses(readEnv("WEBSEARCH_MAX_USES")),
       thinking: pickThinking(options.thinking) ?? resolveThinking(readEnv("WEBSEARCH_THINKING")),
     })
 
-    const response = await fetch(resolveEndpoint(options), {
+    const response = await fetch(endpoint, {
       method: "POST",
       signal,
       headers: {
@@ -677,15 +682,22 @@ export const plugin = {
   async setup(ctx: WebsearchContext): Promise<void> {
     const options = (ctx.options ?? {}) as WebsearchOptions
     const provider = resolveProvider(options)
-    // The model is resolved once; bound the wait so a stuck model API cannot
-    // block plugin setup, and fall back to the provider preset if it times out.
-    const model = (await raceTimeout(resolveModel(ctx, options), 2000)) ?? getPreset(provider)?.defaultModel
+    // Resolve the model once, but re-try lazily if the first attempt timed out
+    // (e.g. a slow model API on start-up for a non-preset provider).
+    let cachedModel =
+      (await raceTimeout(resolveModel(ctx, options), 2000)) ?? getPreset(provider)?.defaultModel
+    const getModel = async (): Promise<string | undefined> => {
+      if (cachedModel) return cachedModel
+      cachedModel = (await raceTimeout(resolveModel(ctx, options), 2000)) ?? getPreset(provider)?.defaultModel
+      return cachedModel
+    }
 
     await ctx.websearch.transform((editor) => {
       editor.add({
         id: provider,
         name: providerDisplay(provider),
         execute: async ({ query }, context) => {
+          const model = await getModel()
           const { answer, sources } = await searchDeepSeek(ctx, options, model, query, context?.signal)
           return toResults(answer, sources)
         },
@@ -729,15 +741,19 @@ export const plugin = {
             },
             options: { namespace: "websearch", codemode: true, pinned: true, permission: "websearch" },
             execute: async (input: { query?: unknown }, context: { signal?: AbortSignal }) => {
-              const query = typeof input?.query === "string" ? input.query.trim() : ""
-              if (!query) throw new Error("query must be a non-empty string")
+              const query = typeof input?.query === "string" ? input.query : ""
+              const model = await getModel()
               const { answer, sources } = await searchDeepSeek(ctx, options, model, query, context?.signal)
               return { output: { answer, sources: toSourceObjects(sources) }, content: toContent(answer, sources) }
             },
           })
         })
-      } catch {
-        // Tool registration is best effort; the websearch provider still works.
+      } catch (error) {
+        // Best effort: the websearch provider still works without the tool.
+        console.warn(
+          "[opencode-websearch-deepseek] Code Mode tool registration failed:",
+          error instanceof Error ? error.message : String(error),
+        )
       }
     }
   },
