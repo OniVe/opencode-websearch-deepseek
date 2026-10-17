@@ -100,7 +100,7 @@ await assert.rejects(
   () => provider.execute({ query: "hi" }, {}),
   (error) => error instanceof Error && error.message.length <= 330 && /E{10}/.test(error.message),
 )
-assert.ok(errorPulls >= 60 && errorPulls <= 70, `errorPulls=${errorPulls}`)
+assert.ok(errorPulls >= 64 && errorPulls <= 66, `errorPulls=${errorPulls}`)
 
 const native = await setupProvider({ searchApi: "native", apiKey: "smoke-key", count: 1 })
 globalThis.fetch = async () =>

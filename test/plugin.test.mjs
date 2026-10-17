@@ -2664,7 +2664,6 @@ test("error body reads stop at the cap", async () => {
   const provider = await register()
   process.env.DEEPSEEK_API_KEY = "test-key"
   let pulls = 0
-  let bytes = 0
   const stream = new ReadableStream({
     pull(controller) {
       pulls++
@@ -2672,8 +2671,7 @@ test("error body reads stop at the cap", async () => {
         controller.close()
         return
       }
-      bytes += 65_536
-      controller.enqueue(new TextEncoder().encode("E".repeat(65_536)))
+      controller.enqueue(new TextEncoder().encode("E".repeat(1024)))
     },
   })
   globalThis.fetch = async () => new Response(stream, { status: 500 })
@@ -2681,8 +2679,7 @@ test("error body reads stop at the cap", async () => {
     () => provider.execute({ query: "hi" }, {}),
     (error) => error instanceof Error,
   )
-  assert.ok(pulls <= 2, `pulls=${pulls}`)
-  assert.ok(bytes <= 131_072, `bytes=${bytes}`)
+  assert.ok(pulls >= 64 && pulls <= 66, `pulls=${pulls}`)
 })
 
 test("a non-resolving cancel does not hang the call", async () => {
