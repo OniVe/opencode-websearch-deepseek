@@ -3,11 +3,11 @@
   "files": {
     "includes": [
       "**",
-      "!.git",
+      "!**/.git",
       "!**/dist",
       "!**/node_modules",
-      "!.opencode",
-      "!coverage",
+      "!**/.opencode",
+      "!**/coverage",
       "!**/*.tgz"
     ]
   },

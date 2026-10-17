@@ -35,9 +35,9 @@ Releases are fully automated:
    version, publishes to npm via **trusted publishing (OIDC)** with provenance,
    creates the git tag, and opens a GitHub Release with generated notes.
 
-`package.json`'s `version` mirrors the latest published release (`0.5.0`); do
-not edit it or tags by hand — `semantic-release` updates the version and tags on
-release. Release notes are the source of truth and live on
+Do not edit `package.json`'s `version` or tags by hand — `semantic-release`
+owns the published version and tags; the checked-in value only names local
+packs. Release notes are the source of truth and live on
 [GitHub Releases](https://github.com/OniVe/opencode-websearch-deepseek/releases).
 
 ## Local development

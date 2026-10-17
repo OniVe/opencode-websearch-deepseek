@@ -1,19 +1,10 @@
 import assert from "node:assert/strict"
 import plugin from "../dist/index.js"
 
-function ok(data) {
-  return {
-    ok: true,
-    status: 200,
-    text: async () => "",
-    json: async () => data,
-  }
-}
-
-async function setupProvider() {
+async function setupProvider(options = { apiKey: "smoke-key" }) {
   let provider
   await plugin.setup({
-    options: { apiKey: "smoke-key" },
+    options,
     websearch: {
       async transform(callback) {
         callback({
@@ -33,56 +24,83 @@ const provider = await setupProvider()
 
 globalThis.fetch = async (_url, init) => {
   assert.equal(init.redirect, "error")
-  return ok({
-    content: [
-      {
-        type: "text",
-        text: "ANSWER",
-        citations: [{ url: "https://a.example/x", cited_text: "quote" }],
-      },
-      {
-        type: "web_search_tool_result",
-        content: [{ type: "web_search_result", url: "https://a.example/x", title: "A" }],
-      },
-    ],
-  })
+  return new Response(
+    JSON.stringify({
+      content: [
+        {
+          type: "text",
+          text: "ANSWER",
+          citations: [{ url: "https://a.example/x", cited_text: "quote" }],
+        },
+        {
+          type: "web_search_tool_result",
+          content: [{ type: "web_search_result", url: "https://a.example/x", title: "A" }],
+        },
+      ],
+    }),
+    { status: 200 },
+  )
 }
 let results = await provider.execute({ query: "hi" }, {})
 assert.equal(results[0].content, "ANSWER")
 assert.equal(results[1].url, "https://a.example/x")
 
 globalThis.fetch = async () =>
-  ok({
-    content: [
-      {
-        type: "web_search_tool_result",
-        content: { type: "web_search_tool_result_error", error_code: "max_uses_exceeded" },
-      },
-      {
-        type: "web_search_tool_result",
-        content: [{ type: "web_search_result", url: "https://", title: "bad" }],
-      },
-    ],
-  })
+  new Response(
+    JSON.stringify({
+      content: [
+        {
+          type: "web_search_tool_result",
+          content: { type: "web_search_tool_result_error", error_code: "max_uses_exceeded" },
+        },
+        {
+          type: "web_search_tool_result",
+          content: [{ type: "web_search_result", url: "https://", title: "bad" }],
+        },
+      ],
+    }),
+    { status: 200 },
+  )
 await assert.rejects(() => provider.execute({ query: "hi" }, {}), /max_uses_exceeded/)
 
 globalThis.fetch = async () =>
-  ok({
-    content: [
-      { type: "text", text: "PARTIAL" },
-      {
-        type: "web_search_tool_result",
-        content: { type: "web_search_tool_result_error", error_code: "max_uses_exceeded" },
-      },
-      {
-        type: "web_search_tool_result",
-        content: [{ type: "web_search_result", url: "https://a.example/x", title: "A" }],
-      },
-    ],
-  })
+  new Response(
+    JSON.stringify({
+      content: [
+        { type: "text", text: "PARTIAL" },
+        {
+          type: "web_search_tool_result",
+          content: { type: "web_search_tool_result_error", error_code: "max_uses_exceeded" },
+        },
+        {
+          type: "web_search_tool_result",
+          content: [{ type: "web_search_result", url: "https://a.example/x", title: "A" }],
+        },
+      ],
+    }),
+    { status: 200 },
+  )
 results = await provider.execute({ query: "hi" }, {})
 assert.equal(results[0].content, "PARTIAL")
 assert.equal(results[1].url, "https://a.example/x")
+
+globalThis.fetch = async () => new Response("E".repeat(100_000), { status: 500 })
+await assert.rejects(
+  () => provider.execute({ query: "hi" }, {}),
+  (error) => error instanceof Error && error.message.length <= 330,
+)
+
+const native = await setupProvider({ searchApi: "native", apiKey: "smoke-key", count: 1 })
+globalThis.fetch = async () =>
+  new Response(
+    JSON.stringify({
+      results: [{ url: "https://native.example/x", title: "N", summary: "S" }],
+    }),
+    { status: 200 },
+  )
+const nativeResults = await native.execute({ query: "hi" }, {})
+assert.equal(nativeResults[0].url, "https://native.example/x")
+assert.equal(nativeResults[0].content, "S")
 
 const controller = new AbortController()
 globalThis.fetch = () => new Promise(() => {})
