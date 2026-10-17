@@ -437,7 +437,7 @@ export function resolveFetchCount(raw: unknown = process.env.WEBSEARCH_FETCH): n
 function providerDisplay(provider: string): string {
   if (provider === "deepseek") return "DeepSeek Web Search"
   if (provider === "anthropic") return "Anthropic Web Search"
-  return `${provider} Web Search`
+  return getPreset(provider) ? `${provider} Web Search` : "Web Search"
 }
 
 /** Read an environment variable, treating blank strings as unset. */
@@ -626,17 +626,34 @@ const searchRateLimiter = createRateLimiter(RATE_LIMIT_INTERVAL_MS)
 const fetchRateLimiter = createRateLimiter(RATE_LIMIT_INTERVAL_MS)
 
 /** Resolve `promise`, or `undefined` if it does not settle within `ms`. */
-async function raceTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+async function raceTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  signal?: AbortSignal,
+): Promise<T | undefined> {
   let timer: ReturnType<typeof setTimeout> | undefined
+  let onAbort: (() => void) | undefined
   try {
-    return await Promise.race([
+    const racers: Array<Promise<T | undefined>> = [
       promise,
       new Promise<undefined>((resolve) => {
         timer = setTimeout(() => resolve(undefined), ms)
       }),
-    ])
+    ]
+    if (signal) {
+      racers.push(
+        new Promise<undefined>((_, reject) => {
+          const abort = () => reject(signal.reason ?? new Error("The web search was aborted"))
+          onAbort = abort
+          if (signal.aborted) abort()
+          else signal.addEventListener("abort", abort, { once: true })
+        }),
+      )
+    }
+    return await Promise.race(racers)
   } finally {
     if (timer) clearTimeout(timer)
+    if (onAbort) signal?.removeEventListener("abort", onAbort)
   }
 }
 
@@ -796,8 +813,17 @@ export function extractAnswerAndSources(data: DeepSeekResponse): {
   const textParts: string[] = []
 
   const blocks = Array.isArray(data?.content) ? data.content : []
+  let toolError: string | undefined
 
   for (const block of blocks) {
+    if (block?.type === "web_search_tool_result" && !Array.isArray(block.content)) {
+      const content = block.content as { type?: unknown; error_code?: unknown } | undefined
+      if (content && content.type === "web_search_tool_result_error") {
+        toolError =
+          typeof content.error_code === "string" ? content.error_code : "web_search_tool_result_error"
+      }
+      continue
+    }
     if (block?.type === "web_search_tool_result" && Array.isArray(block.content)) {
       for (const item of block.content as Array<Record<string, unknown>>) {
         if (item?.type === "web_search_result" && typeof item.url === "string") {
@@ -825,6 +851,7 @@ export function extractAnswerAndSources(data: DeepSeekResponse): {
     }
   }
 
+  if (toolError) throw new Error(`Web search error: ${toolError}`)
   return { answer: textParts.join("\n\n"), sources: dedupeSources(collected) }
 }
 
@@ -1165,10 +1192,15 @@ export const plugin = {
       if (searchApi === "native") return undefined
       if (cachedModel) return cachedModel
       if (signal?.aborted) throwCancellation(signal, undefined)
-      const resolved = await withAbort(raceTimeout(resolveModel(ctx, options), 2000), signal)
-      if (signal?.aborted) throwCancellation(signal, undefined)
-      cachedModel = resolved ?? getPreset(provider)?.defaultModel
-      return cachedModel
+      try {
+        const resolved = await raceTimeout(resolveModel(ctx, options), 2000, signal)
+        if (signal?.aborted) throwCancellation(signal, undefined)
+        cachedModel = resolved ?? getPreset(provider)?.defaultModel
+        return cachedModel
+      } catch (error) {
+        if (signal?.aborted) throwCancellation(signal, error)
+        throw error
+      }
     }
 
     await ctx.websearch.transform((editor) => {

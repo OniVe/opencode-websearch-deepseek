@@ -1961,8 +1961,11 @@ test("aborting during the lazy model lookup rejects promptly", async () => {
   const controller = new AbortController()
   const started = Date.now()
   const call = captured.execute({ query: "hi" }, { signal: controller.signal })
-  setTimeout(() => controller.abort(new Error("mid-model")), 10)
-  await assert.rejects(() => call, /mid-model/)
+  setTimeout(() => controller.abort("mid-model"), 10)
+  await assert.rejects(
+    () => call,
+    (error) => error instanceof Error && /mid-model/.test(error.message),
+  )
   assert.ok(Date.now() - started < 150)
 })
 
@@ -2022,4 +2025,40 @@ test("configuration errors do not echo provider values", async () => {
     () => captured.execute({ query: "hi" }, {}),
     (error) => error instanceof Error && !error.message.includes(secret),
   )
+})
+
+test("messages surfaces a web search tool error", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => "",
+    json: async () => ({
+      content: [
+        {
+          type: "web_search_tool_result",
+          content: { type: "web_search_tool_result_error", error_code: "max_uses_exceeded" },
+        },
+      ],
+    }),
+  })
+  await assert.rejects(() => provider.execute({ query: "hi" }, {}), /max_uses_exceeded/)
+})
+
+test("tool schema advertises the backend query limit", async () => {
+  let toolDef
+  const fake = (options) => ({
+    options,
+    websearch: { async transform(callback) { callback({ add() {}, default: { set() {} } }) } },
+    tool: { async transform(callback) { callback({ namespace() {}, add(tool) { toolDef = tool } }) } },
+  })
+
+  await plugin.setup(fake({ searchApi: "native", apiKey: "k" }))
+  assert.equal(toolDef.input.properties.query.maxLength, 128)
+  assert.match(toolDef.input.properties.query.description, /128/)
+
+  toolDef = undefined
+  await plugin.setup(fake({ apiKey: "k" }))
+  assert.equal(toolDef.input.properties.query.maxLength, 8192)
 })
