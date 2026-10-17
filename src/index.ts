@@ -286,8 +286,8 @@ export function resolveProvider(options?: WebsearchOptions): string {
 /** Hide userinfo and query/fragment before echoing a URL in an error message. */
 function redactUrl(value: string): string {
   return value
-    .replace(/[?#].*$/, "")
-    .replace(/^([a-z][a-z0-9+.-]*:)([/\\]*)[^/\\]*@/i, "$1$2<redacted>@")
+    .replace(/^((?:[a-z][a-z0-9+.-]*:)?[/\\]*)[^/\\]*@/i, "$1<redacted>@")
+    .replace(/[?#][\s\S]*$/, "")
 }
 
 /** Parse and validate an http(s) URL; rejects empty authorities and credentials. */
@@ -373,7 +373,7 @@ export function resolveSearchBaseUrl(options?: WebsearchOptions): string {
         : undefined
     if (!suffix) {
       throw new Error(
-        `searchApi "native" cannot derive a base URL from baseUrl "${baseUrl}": set the searchBaseUrl plugin option`,
+        'searchApi "native" cannot derive a base URL from baseUrl: set the searchBaseUrl plugin option',
       )
     }
     return `${url.origin}${strip(path.replace(suffix, ""))}`
@@ -738,7 +738,7 @@ export function dedupeSources(sources: readonly DeepSeekSource[]): DeepSeekSourc
 function isHttpSourceUrl(value: string): boolean {
   if (value.length > 8192) return false
   // Reject raw control characters and backslashes that URL parsers normalize.
-  if (/[\u0000-\u001f\u007f\u2028\u2029\\]/.test(value)) return false
+  if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029\ufeff\u200b-\u200f\\]/.test(value)) return false
   try {
     const url = new URL(value)
     return (
@@ -790,9 +790,11 @@ export function extractAnswerAndSources(data: DeepSeekResponse): {
     if (block?.type === "web_search_tool_result" && Array.isArray(block.content)) {
       for (const item of block.content as Array<Record<string, unknown>>) {
         if (item?.type === "web_search_result" && typeof item.url === "string") {
+          const url = item.url.trim()
+          if (!url) continue
           collected.push({
-            url: item.url,
-            title: typeof item.title === "string" ? item.title : item.url,
+            url,
+            title: typeof item.title === "string" ? item.title : url,
           })
         }
       }
@@ -804,12 +806,9 @@ export function extractAnswerAndSources(data: DeepSeekResponse): {
     const citations = (block as { citations?: unknown } | undefined)?.citations
     if (Array.isArray(citations)) {
       for (const citation of citations as Array<Record<string, unknown>>) {
-        if (
-          typeof citation?.url === "string" &&
-          typeof citation.cited_text === "string" &&
-          citation.cited_text.trim()
-        ) {
-          collected.push({ url: citation.url, content: citation.cited_text.trim() })
+        const url = typeof citation?.url === "string" ? citation.url.trim() : ""
+        if (url && typeof citation.cited_text === "string" && citation.cited_text.trim()) {
+          collected.push({ url, content: citation.cited_text.trim() })
         }
       }
     }
@@ -1022,7 +1021,15 @@ async function nativeSearch(
     signal,
   )) as NativeSearchResponse | undefined
 
-  let sources = mapNativeResults(data?.results)
+  if (!data || !Array.isArray(data.results)) {
+    const message = (data as { error?: { message?: unknown } } | undefined)?.error?.message
+    if (typeof message === "string" && message.trim()) {
+      throw new Error(`Web search API error: ${message.trim()}`)
+    }
+    throw new Error("Web search API returned no results array")
+  }
+
+  let sources = mapNativeResults(data.results)
   if (fetchCount > 0 && sources.length > 0) {
     sources = await enrichWithFetch(baseUrl, apiKey, sources, fetchCount, signal)
   }
@@ -1044,6 +1051,10 @@ export async function searchDeepSeek(
   searchApi: SearchApi = resolveSearchApi(options),
 ): Promise<{ answer: string; sources: DeepSeekSource[] }> {
   const provider = resolveProvider(options)
+  // Reject absurd native queries before trim/scan (native limit is 128 code points).
+  if (searchApi === "native" && typeof query === "string" && query.length > 256) {
+    throw new Error("query must be at most 128 characters for the native search API")
+  }
   const trimmedQuery = typeof query === "string" ? query.trim() : ""
   try {
     if (!trimmedQuery) throw new Error("query must be a non-empty string")
@@ -1136,6 +1147,7 @@ export const plugin = {
         id: provider,
         name: providerDisplay(provider),
         execute: async ({ query }, context) => {
+          if (context?.signal?.aborted) throwCancellation(context.signal, undefined)
           const model = await getModel()
           const { answer, sources } = await searchDeepSeek(
             ctx,
@@ -1188,6 +1200,7 @@ export const plugin = {
             options: { namespace: "websearch", codemode: true, pinned: true, permission: "websearch" },
             execute: async (input: { query?: unknown }, context: { signal?: AbortSignal }) => {
               const query = typeof input?.query === "string" ? input.query : ""
+              if (context?.signal?.aborted) throwCancellation(context.signal, undefined)
               const model = await getModel()
               const { answer, sources } = await searchDeepSeek(
                 ctx,

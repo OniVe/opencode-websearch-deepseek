@@ -195,6 +195,8 @@ Messages tool:
   a custom `baseUrl` by stripping the `/anthropic/v1/messages` or `/v1/messages`
   suffix. For non-DeepSeek providers (or base URLs without that suffix) set
   `searchBaseUrl` or keep `searchApi: "messages"`.
+- `searchApi` is fixed when the plugin loads; `searchBaseUrl`, `count`,
+  `needContent`, and `fetch` are read on each call.
 - Queries are limited to 1–128 Unicode characters by the native API; the plugin
   rejects longer queries before the request.
 - Billing: direct Search and Fetch calls cost $0.75 per 1,000 successful
