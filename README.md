@@ -102,7 +102,7 @@ from `ctx.options`):
 | `maxUses`       | `5`               | Max server-side searches per query (`messages`).       |
 | `thinking`      | `enabled`         | `enabled` or `disabled` (`messages`).                  |
 | `searchApi`     | `messages`        | `messages` (answer) or `native` (DeepSeek JSON APIs).  |
-| `searchBaseUrl` | derived           | Base URL for the native `/v1/tools/*` APIs.            |
+| `searchBaseUrl` | derived           | Base URL (origin/prefix) for the native APIs.          |
 | `count`         | `10`              | Native results to request (1–50).                      |
 | `needContent`   | `false`           | Pass `need_content` to the native Search API.          |
 | `fetch`         | `0`               | Fetch full page Markdown for the top N native results. |
@@ -179,16 +179,19 @@ Messages tool:
   the search response.
 - `fetch: N` then calls `POST /v1/tools/fetch` for the top N results and
   replaces their content with full page Markdown. Fetch is best effort: the
-  search still succeeds if a page cannot be retrieved. Request starts are
-  spaced by at least 200 ms (5 QPS per account); failures are reported once via
-  `console.warn`.
+  search still succeeds if a page cannot be retrieved. Native request starts
+  (search and fetch) are paced process-wide by at least 200 ms (5 QPS per
+  account); failures are reported once via `console.warn`.
 - The native Search API does **not** synthesize an answer, so `answer` is `""`;
   the provider returns the source list and `tools.websearch.search` returns
   `{ answer: "", sources }`. The model reads the source content.
+- Only `url`, `title`, and `content` are exposed to the model; `site_name`,
+  `date`, `authority`, and `rerank_score` are read but not returned.
 - The base URL defaults to `https://api.deepseek.com` and can be overridden with
-  `searchBaseUrl`; it is also derived from a custom `baseUrl` by stripping the
-  `/anthropic/v1/messages` or `/v1/messages` suffix. For non-DeepSeek providers
-  (or base URLs without that suffix) set `searchBaseUrl` or keep
+  `searchBaseUrl` (an origin or path prefix without `/v1`; the `/v1/tools/*`
+  suffix is appended). It is also derived from a custom `baseUrl` by stripping
+  the `/anthropic/v1/messages` or `/v1/messages` suffix. For non-DeepSeek
+  providers (or base URLs without that suffix) set `searchBaseUrl` or keep
   `searchApi: "messages"`.
 - Queries are limited to 1–128 Unicode characters by the native API; the plugin
   rejects longer queries before the request.
@@ -198,7 +201,8 @@ Messages tool:
   calls the APIs directly.) Query operators (`site:`, `-site:`, `"..."`,
   `lang:`, `after:`, `before:`) are passed through unchanged.
 - There is no client-side timeout: a slow page can delay a `fetch` call until
-  the API's own timeout (~30 s per page).
+  the API's own timeout. Prefer `https` for the base URL; an `http` endpoint
+  sends the API key in clear text.
 
 ## Code Mode (execute)
 

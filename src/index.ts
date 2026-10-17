@@ -56,8 +56,8 @@ export const DEFAULT_COUNT = 10
 /** Maximum number of results accepted by the native Search API. */
 export const MAX_COUNT = 50
 
-/** Minimum spacing between Fetch requests (5 QPS per account). */
-export const FETCH_MIN_INTERVAL_MS = 200
+/** Minimum spacing between native API requests (5 QPS per account). */
+export const RATE_LIMIT_INTERVAL_MS = 200
 
 /** Fallback URL used when a result has no source of its own. */
 export const FALLBACK_URL = "https://api.deepseek.com"
@@ -283,25 +283,31 @@ export function resolveProvider(options?: WebsearchOptions): string {
   return readString(options?.provider) ?? DEFAULT_PROVIDER
 }
 
+/** Hide userinfo before echoing a URL in an error message. */
+function redactUrl(value: string): string {
+  return value.replace(/\/\/[^/@]*@/, "//<redacted>@")
+}
+
 /** Parse and validate an http(s) URL; rejects empty authorities and credentials. */
 function parseHttpUrl(value: string, label: string): URL {
+  const shown = redactUrl(value)
   if (/^https?:\/\/[/\\]/i.test(value)) {
-    throw new Error(`Invalid ${label} "${value}": expected an http(s) URL`)
+    throw new Error(`Invalid ${label} "${shown}": expected an http(s) URL`)
   }
   let url: URL
   try {
     url = new URL(value)
   } catch {
-    throw new Error(`Invalid ${label} "${value}": expected an http(s) URL`)
+    throw new Error(`Invalid ${label} "${shown}": expected an http(s) URL`)
   }
   if ((url.protocol !== "http:" && url.protocol !== "https:") || !url.hostname) {
-    throw new Error(`Invalid ${label} "${value}": expected an http(s) URL`)
+    throw new Error(`Invalid ${label} "${shown}": expected an http(s) URL`)
   }
   if (url.username || url.password) {
-    throw new Error(`Invalid ${label} "${value}": credentials are not allowed`)
+    throw new Error(`Invalid ${label} "${shown}": credentials are not allowed`)
   }
   if (url.search || url.hash) {
-    throw new Error(`Invalid ${label} "${value}": query and fragment are not allowed`)
+    throw new Error(`Invalid ${label} "${shown}": query and fragment are not allowed`)
   }
   return url
 }
@@ -567,6 +573,24 @@ function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
   })
 }
 
+/** Process-wide pacer: the DeepSeek limits are per account, not per call. */
+function createRateLimiter(intervalMs: number) {
+  let last = 0
+  return {
+    async next(signal?: AbortSignal): Promise<void> {
+      if (signal?.aborted) {
+        throw signal.reason ?? new Error("The web search was aborted")
+      }
+      const wait = last === 0 ? 0 : intervalMs - (Date.now() - last)
+      if (wait > 0) await abortableDelay(wait, signal)
+      last = Date.now()
+    },
+  }
+}
+
+const searchRateLimiter = createRateLimiter(RATE_LIMIT_INTERVAL_MS)
+const fetchRateLimiter = createRateLimiter(RATE_LIMIT_INTERVAL_MS)
+
 /** Resolve `promise`, or `undefined` if it does not settle within `ms`. */
 async function raceTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -678,6 +702,22 @@ export function dedupeSources(sources: readonly DeepSeekSource[]): DeepSeekSourc
   return [...byUrl.values()]
 }
 
+/** Only http(s) URLs with a host and no credentials are usable sources. */
+function isHttpSourceUrl(value: string): boolean {
+  if (value.length > 8192) return false
+  try {
+    const url = new URL(value)
+    return (
+      (url.protocol === "http:" || url.protocol === "https:") &&
+      Boolean(url.hostname) &&
+      !url.username &&
+      !url.password
+    )
+  } catch {
+    return false
+  }
+}
+
 /**
  * Map native Search API results to the plugin's source shape. Page `content`
  * wins when present, then the API's model-oriented `summary` (600-800 chars),
@@ -690,7 +730,7 @@ export function mapNativeResults(results: unknown): DeepSeekSource[] {
   // returns an unexpectedly large array.
   for (const item of results.slice(0, MAX_COUNT) as Array<Record<string, unknown>>) {
     const url = readString(item?.url)
-    if (!url) continue
+    if (!url || !isHttpSourceUrl(url)) continue
     const content =
       readString(item.content) ?? readString(item.summary) ?? readString(item.snippet) ?? ""
     const title = readString(item.title)
@@ -840,6 +880,7 @@ async function postNativeTool(
   body: unknown,
   signal?: AbortSignal,
 ): Promise<unknown> {
+  if (signal?.aborted) throwCancellation(signal, undefined)
   const response = await fetch(url, {
     method: "POST",
     signal,
@@ -871,6 +912,7 @@ async function fetchNativePage(
   signal?: AbortSignal,
 ): Promise<{ title?: string; content?: string } | undefined> {
   try {
+    await fetchRateLimiter.next(signal)
     const data = (await postNativeTool(`${baseUrl}/v1/tools/fetch`, apiKey, { url }, signal)) as
       | { title?: unknown; content?: unknown }
       | undefined
@@ -891,14 +933,8 @@ async function enrichWithFetch(
 ): Promise<DeepSeekSource[]> {
   const enriched = [...sources]
   const count = Math.min(limit, enriched.length)
-  let lastFetch = 0
   let failed = 0
   for (let index = 0; index < count; index++) {
-    if (lastFetch > 0) {
-      const wait = FETCH_MIN_INTERVAL_MS - (Date.now() - lastFetch)
-      if (wait > 0) await abortableDelay(wait, signal)
-    }
-    lastFetch = Date.now()
     const source = enriched[index]
     if (!source) continue
     const page = await fetchNativePage(baseUrl, apiKey, source.url, signal)
@@ -939,6 +975,7 @@ async function nativeSearch(
   const fetchCount =
     pickIntegerInRange(options.fetch, 0, MAX_COUNT) ?? resolveFetchCount(readEnv("WEBSEARCH_FETCH"))
 
+  await searchRateLimiter.next(signal)
   const data = (await postNativeTool(
     `${baseUrl}/v1/tools/search`,
     apiKey,
@@ -950,6 +987,8 @@ async function nativeSearch(
   if (fetchCount > 0 && sources.length > 0) {
     sources = await enrichWithFetch(baseUrl, apiKey, sources, fetchCount, signal)
   }
+  // A cancellation may arrive after the last fetch completed.
+  if (signal?.aborted) throwCancellation(signal, undefined)
   return { answer: "", sources }
 }
 
@@ -986,6 +1025,7 @@ export async function searchDeepSeek(
       thinking: pickThinking(options.thinking) ?? resolveThinking(readEnv("WEBSEARCH_THINKING")),
     })
 
+    if (signal?.aborted) throwCancellation(signal, undefined)
     const response = await fetch(endpoint, {
       method: "POST",
       signal,

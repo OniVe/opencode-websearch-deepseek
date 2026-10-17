@@ -48,7 +48,10 @@ const savedEnv = {}
 const savedFetch = globalThis.fetch
 
 before(() => {
-  for (const key of ENV_KEYS) savedEnv[key] = process.env[key]
+  for (const key of ENV_KEYS) {
+    savedEnv[key] = process.env[key]
+    delete process.env[key]
+  }
 })
 
 after(() => {
@@ -235,7 +238,9 @@ test("execute sends the API key, version header, and improvements", async () => 
   delete process.env.WEBSEARCH_MODEL
 
   let seen
+  let calls = 0
   globalThis.fetch = async (url, init) => {
+    calls++
     seen = { url, init }
     return {
       ok: true,
@@ -259,6 +264,7 @@ test("execute sends the API key, version header, and improvements", async () => 
   const results = await provider.execute({ query: "hi" }, {})
 
   assert.equal(seen.url, API_URL)
+  assert.equal(calls, 1)
   assert.equal(seen.init.headers["anthropic-version"], ANTHROPIC_VERSION)
   assert.equal(seen.init.headers["x-api-key"], "test-key")
 
@@ -1166,21 +1172,27 @@ test("native search fetches full Markdown for the top N results", async () => {
 
 test("native fetch failures are best effort", async () => {
   const provider = await registerWith({ searchApi: "native", apiKey: "k", count: 1, fetch: 1 })
+  const originalWarn = console.warn
+  console.warn = () => {}
 
-  globalThis.fetch = async (url) => {
-    if (url === SEARCH_URL) {
-      return {
-        ok: true,
-        status: 200,
-        text: async () => "",
-        json: async () => ({ results: [{ url: "https://a", title: "A", summary: "sum a" }] }),
+  try {
+    globalThis.fetch = async (url) => {
+      if (url === SEARCH_URL) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          json: async () => ({ results: [{ url: "https://a", title: "A", summary: "sum a" }] }),
+        }
       }
+      return { ok: false, status: 404, text: async () => "no content", json: async () => ({}) }
     }
-    return { ok: false, status: 404, text: async () => "no content", json: async () => ({}) }
-  }
 
-  const results = await provider.execute({ query: "hi" }, {})
-  assert.equal(results[0].content, "sum a")
+    const results = await provider.execute({ query: "hi" }, {})
+    assert.equal(results[0].content, "sum a")
+  } finally {
+    console.warn = originalWarn
+  }
 })
 
 test("native search surfaces the OpenAI-style error message", async () => {
@@ -1201,11 +1213,13 @@ test("native search honours an already-aborted signal", async () => {
   const provider = await registerWith({ searchApi: "native", apiKey: "k" })
   const controller = new AbortController()
   controller.abort(new Error("stop now"))
-  globalThis.fetch = async (_url, init) => {
-    assert.equal(init.signal.aborted, true)
-    throw init.signal.reason
+  let calls = 0
+  globalThis.fetch = async () => {
+    calls++
+    throw new Error("must not be called")
   }
   await assert.rejects(() => provider.execute({ query: "hi" }, { signal: controller.signal }), /stop now/)
+  assert.equal(calls, 0)
 })
 
 test("native mode skips model resolution at setup", async () => {
@@ -1369,7 +1383,36 @@ test("fetch enrichment spaces request starts to respect 5 QPS", async () => {
   await provider.execute({ query: "hi" }, {})
   const fetches = started.filter((call) => call.url === FETCH_URL)
   assert.equal(fetches.length, 2)
-  assert.ok(fetches[1].at - fetches[0].at >= 190, "fetch starts must be ~200ms apart")
+  assert.ok(fetches[1].at - fetches[0].at >= 195, "fetch starts must be ~200ms apart")
+})
+
+test("request pacing is shared by concurrent calls", async () => {
+  const provider = await registerWith({ searchApi: "native", apiKey: "k", count: 1, fetch: 1 })
+  const started = []
+  globalThis.fetch = async (url) => {
+    started.push({ url, at: Date.now() })
+    if (url === SEARCH_URL) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => "",
+        json: async () => ({ results: [{ url: "https://a", summary: "a" }] }),
+      }
+    }
+    return { ok: true, status: 200, text: async () => "", json: async () => ({ title: "T", content: "C" }) }
+  }
+
+  await Promise.all([
+    provider.execute({ query: "first" }, {}),
+    provider.execute({ query: "second" }, {}),
+  ])
+
+  const searchStarts = started.filter((call) => call.url === SEARCH_URL).map((call) => call.at)
+  const fetchStarts = started.filter((call) => call.url === FETCH_URL).map((call) => call.at)
+  assert.equal(searchStarts.length, 2)
+  assert.equal(fetchStarts.length, 2)
+  assert.ok(searchStarts[1] - searchStarts[0] >= 195, "concurrent searches must be paced")
+  assert.ok(fetchStarts[1] - fetchStarts[0] >= 195, "concurrent fetches must be paced")
 })
 
 test("setup snapshots searchApi for later calls", async () => {
@@ -1404,4 +1447,117 @@ test("Code Mode tool reports an empty native result set", async () => {
   const result = await toolDef.execute({ query: "hi" }, {})
   assert.deepEqual(result.output, { answer: "", sources: [] })
   assert.match(result.content, /no results/)
+})
+
+test("messages mode sends nothing for an already-aborted signal", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  const controller = new AbortController()
+  controller.abort(new Error("pre-abort"))
+  let calls = 0
+  globalThis.fetch = async () => {
+    calls++
+    throw new Error("must not be called")
+  }
+  await assert.rejects(() => provider.execute({ query: "hi" }, { signal: controller.signal }), /pre-abort/)
+  assert.equal(calls, 0)
+})
+
+test("native fetch failures produce one warning without the key", async () => {
+  const provider = await registerWith({ searchApi: "native", apiKey: "secret-key", count: 3, fetch: 3 })
+  const warnings = []
+  const originalWarn = console.warn
+  console.warn = (...args) => warnings.push(args.join(" "))
+  try {
+    globalThis.fetch = async (url) => {
+      if (url === SEARCH_URL) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => "",
+          json: async () => ({
+            results: [
+              { url: "https://a", summary: "a" },
+              { url: "https://b", summary: "b" },
+              { url: "https://c", summary: "c" },
+            ],
+          }),
+        }
+      }
+      return { ok: false, status: 404, text: async () => "nope", json: async () => ({}) }
+    }
+    await provider.execute({ query: "hi" }, {})
+  } finally {
+    console.warn = originalWarn
+  }
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0], /3 of 3/)
+  assert.doesNotMatch(warnings[0], /secret-key/)
+})
+
+test("aborting during the fetch pacing delay stops the run", async () => {
+  const provider = await registerWith({ searchApi: "native", apiKey: "k", count: 3, fetch: 3 })
+  const controller = new AbortController()
+  let fetchCalls = 0
+  globalThis.fetch = async (url) => {
+    if (url === SEARCH_URL) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => "",
+        json: async () => ({
+          results: [
+            { url: "https://a", summary: "a" },
+            { url: "https://b", summary: "b" },
+            { url: "https://c", summary: "c" },
+          ],
+        }),
+      }
+    }
+    fetchCalls++
+    if (fetchCalls === 1) setTimeout(() => controller.abort(new Error("gap-abort")), 50)
+    return { ok: true, status: 200, text: async () => "", json: async () => ({ title: "T", content: "C" }) }
+  }
+
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, { signal: controller.signal }),
+    /gap-abort/,
+  )
+  assert.equal(fetchCalls, 1)
+})
+
+test("aborting on the last fetch rejects instead of succeeding", async () => {
+  const provider = await registerWith({ searchApi: "native", apiKey: "k", count: 1, fetch: 1 })
+  const controller = new AbortController()
+  globalThis.fetch = async (url) => {
+    if (url === SEARCH_URL) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => "",
+        json: async () => ({ results: [{ url: "https://a", summary: "a" }] }),
+      }
+    }
+    controller.abort(new Error("last-fetch"))
+    throw controller.signal.reason
+  }
+
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, { signal: controller.signal }),
+    /last-fetch/,
+  )
+})
+
+test("mapNativeResults drops non-http and credential URLs", () => {
+  assert.deepEqual(
+    mapNativeResults([
+      { url: "javascript:alert(1)", title: "x" },
+      { url: "file:///etc/passwd" },
+      { url: "https://user:pass@host/x" },
+      { url: "relative/path" },
+      { url: `https://long.example/${"a".repeat(8200)}` },
+      { url: "https://ok.example/x", title: "OK", summary: "sum" },
+    ]),
+    [{ url: "https://ok.example/x", title: "OK", content: "sum" }],
+  )
 })
