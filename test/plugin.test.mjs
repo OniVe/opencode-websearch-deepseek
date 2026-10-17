@@ -2361,6 +2361,7 @@ test("error body reads stop at the cap", async () => {
   const provider = await register()
   process.env.DEEPSEEK_API_KEY = "test-key"
   let pulls = 0
+  let bytes = 0
   const stream = new ReadableStream({
     pull(controller) {
       pulls++
@@ -2368,6 +2369,7 @@ test("error body reads stop at the cap", async () => {
         controller.close()
         return
       }
+      bytes += 65_536
       controller.enqueue(new TextEncoder().encode("E".repeat(65_536)))
     },
   })
@@ -2376,7 +2378,8 @@ test("error body reads stop at the cap", async () => {
     () => provider.execute({ query: "hi" }, {}),
     (error) => error instanceof Error,
   )
-  assert.ok(pulls <= 3, `pulls=${pulls}`)
+  assert.ok(pulls <= 2, `pulls=${pulls}`)
+  assert.ok(bytes <= 131_072, `bytes=${bytes}`)
 })
 
 test("a non-resolving cancel does not hang the call", async () => {
@@ -2494,5 +2497,77 @@ test("success bodies are capped at 8 MiB", async () => {
   })
   globalThis.fetch = async () => new Response(stream, { status: 200 })
   await assert.rejects(() => provider.execute({ query: "hi" }, {}), /invalid response/)
-  assert.ok(pulls > 100 && pulls <= 140, `pulls=${pulls}`)
+  assert.ok(pulls >= 128 && pulls <= 130, `pulls=${pulls}`)
+})
+
+test("messages rejects a fatal tool error without valid sources", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => "",
+    json: async () => ({
+      content: [
+        {
+          type: "web_search_tool_result",
+          content: { type: "web_search_tool_result_error", error_code: "max_uses_exceeded" },
+        },
+        {
+          type: "web_search_tool_result",
+          content: [{ type: "web_search_result", url: "https://", title: "bad" }],
+        },
+      ],
+    }),
+  })
+  await assert.rejects(() => provider.execute({ query: "hi" }, {}), /max_uses_exceeded/)
+})
+
+test("a slow model is awaited on the first search without a preset", async () => {
+  let captured
+  await plugin.setup({
+    options: { provider: "anthropic", apiKey: "k" },
+    model: {
+      async default() {
+        await new Promise((resolve) => setTimeout(resolve, 2500))
+        return { providerID: "anthropic", modelID: "claude-warm" }
+      },
+    },
+    websearch: { async transform(callback) { callback({ add(provider) { captured = provider }, default: { set() {} } }) } },
+  })
+  let body
+  globalThis.fetch = async (_url, init) => {
+    body = JSON.parse(init.body)
+    return { ok: true, status: 200, text: async () => "", json: async () => ({ content: [] }) }
+  }
+  await captured.execute({ query: "hi" }, {})
+  assert.equal(body.model, "claude-warm")
+})
+
+test("a late model lookup is picked up after the refresh window", async () => {
+  let calls = 0
+  let captured
+  await plugin.setup({
+    options: { provider: "deepseek", apiKey: "k" },
+    model: {
+      async default() {
+        calls++
+        await new Promise((resolve) => setTimeout(resolve, 8000))
+        return { providerID: "deepseek", modelID: "late" }
+      },
+    },
+    websearch: { async transform(callback) { callback({ add(provider) { captured = provider }, default: { set() {} } }) } },
+  })
+  let body
+  globalThis.fetch = async (_url, init) => {
+    body = JSON.parse(init.body)
+    return { ok: true, status: 200, text: async () => "", json: async () => ({ content: [] }) }
+  }
+  await captured.execute({ query: "first" }, {})
+  await new Promise((resolve) => setTimeout(resolve, 5200))
+  await captured.execute({ query: "second" }, {})
+  await new Promise((resolve) => setTimeout(resolve, 1000))
+  await captured.execute({ query: "third" }, {})
+  assert.equal(body.model, "late")
+  assert.equal(calls, 1)
 })

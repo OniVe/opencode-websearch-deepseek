@@ -132,8 +132,10 @@ from `ctx.options`):
   the provider's integration (after `opencode auth login`). No key is needed when
   the provider is authenticated in OpenCode.
 - **Model:** `options.model` → `WEBSEARCH_MODEL` → OpenCode's default model when
-  it belongs to the same provider → provider preset default. Resolved once; for
-  providers without a preset default, a timed-out lookup is retried lazily.
+  it belongs to the same provider → provider preset default. Resolved once with
+  a 2 s startup budget; on timeout the preset is used immediately and a
+  background refresh updates it. Providers without a preset wait up to 2 s on
+  the first search, then retry with a cooldown.
 - **Endpoint:** `options.baseUrl` → provider preset
   (`https://api.deepseek.com/anthropic/v1/messages`,
   `https://api.anthropic.com/v1/messages`).

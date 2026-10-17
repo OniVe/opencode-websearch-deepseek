@@ -622,6 +622,7 @@ async function raceTimeout<T>(
   promise: Promise<T>,
   ms: number,
   signal?: AbortSignal,
+  unref = false,
 ): Promise<T | undefined> {
   let timer: ReturnType<typeof setTimeout> | undefined
   let onAbort: (() => void) | undefined
@@ -630,6 +631,7 @@ async function raceTimeout<T>(
       promise,
       new Promise<undefined>((resolve) => {
         timer = setTimeout(() => resolve(undefined), ms)
+        if (unref) (timer as { unref?: () => void }).unref?.()
       }),
     ]
     if (signal) {
@@ -845,10 +847,12 @@ export function extractAnswerAndSources(data: DeepSeekResponse): {
     }
   }
 
-  if (toolError && textParts.length === 0 && collected.length === 0) {
+  const answer = textParts.join("\n\n")
+  const sources = dedupeSources(collected)
+  if (toolError && !answer && sources.length === 0) {
     throw new Error(`Web search error: ${toolError}`)
   }
-  return { answer: textParts.join("\n\n"), sources: dedupeSources(collected) }
+  return { answer, sources }
 }
 
 /**
@@ -1295,7 +1299,7 @@ export const plugin = {
     const refreshModel = () => {
       if (refreshing || modelResolved || !modelPromise) return
       refreshing = true
-      void raceTimeout(modelPromise, 5000)
+      void raceTimeout(modelPromise, 5000, undefined, true)
         .then((resolved) => {
           if (resolved !== undefined) {
             cachedModel = resolved
@@ -1307,11 +1311,35 @@ export const plugin = {
           refreshing = false
         })
     }
+    let nextModelRetry = 0
     const getModel = async (signal?: AbortSignal): Promise<string | undefined> => {
       if (searchApi === "native") return undefined
       if (signal?.aborted) throwCancellation(signal, undefined)
-      if (!modelResolved) refreshModel()
-      return cachedModel
+      if (modelResolved) return cachedModel
+      if (cachedModel) {
+        refreshModel()
+        return cachedModel
+      }
+      if (!modelPromise) return undefined
+      if (Date.now() < nextModelRetry) {
+        refreshModel()
+        return undefined
+      }
+      try {
+        const resolved = await raceTimeout(modelPromise, 2000, signal)
+        if (signal?.aborted) throwCancellation(signal, undefined)
+        if (resolved !== undefined) {
+          cachedModel = resolved
+          modelResolved = true
+          return resolved
+        }
+      } catch (error) {
+        if (signal?.aborted) throwCancellation(signal, error)
+        throw error
+      }
+      nextModelRetry = Date.now() + 30_000
+      refreshModel()
+      return undefined
     }
 
     await ctx.websearch.transform((editor) => {
