@@ -1360,6 +1360,10 @@ test("native search trims padding without rejecting a short query", async () => 
     await provider.execute({ query: " ".repeat(padding) + "hello" }, {})
     assert.equal(body.query, "hello")
   }
+  for (const padding of [127, 128, 200, 255, 256]) {
+    await provider.execute({ query: " ".repeat(padding) + "hi" + " ".repeat(padding) }, {})
+    assert.equal(body.query, "hi")
+  }
 })
 
 test("aborting during fetch enrichment stops the remaining fetches", async () => {
@@ -1734,7 +1738,7 @@ test("aborting a queued caller rejects without waiting for its slot", async () =
   assert.deepEqual(bodies, ["first", "second", "third", "after"])
 })
 
-test("native search rejects a huge query without scanning it", async () => {
+test("native search rejects an oversized query", async () => {
   const provider = await registerWith({ searchApi: "native", apiKey: "k" })
   let calls = 0
   globalThis.fetch = async () => {
@@ -1746,7 +1750,7 @@ test("native search rejects a huge query without scanning it", async () => {
   const started = Date.now()
   await assert.rejects(() => provider.execute({ query: huge }, {}), /at most 128/)
   await assert.rejects(() => provider.execute({ query: whitespace }, {}), /non-empty/)
-  assert.ok(Date.now() - started < 20)
+  assert.ok(Date.now() - started < 100)
   assert.equal(calls, 0)
 })
 
@@ -1771,7 +1775,10 @@ test("URL validation rejects control characters and backslashes", () => {
       { url: "https://ok.example/a\u00adb", title: "shy" },
       { url: "https://ok.example/a\uFE0Fb", title: "vs16" },
       { url: "https://ok.example/a\u{E0100}b", title: "vs-supp" },
+      { url: "https://ok.example/a\u180Bb", title: "fvs" },
+      { url: "https://ok.example/a\u034Fb", title: "cgj" },
       { url: "https:///x", title: "empty-authority" },
+      { url: "https:/example.com/a", title: "single-slash" },
       { url: "https://ok.example/ok", title: "OK" },
     ]),
     [{ url: "https://ok.example/ok", title: "OK", content: "" }],
@@ -1892,20 +1899,32 @@ test("messages rejects a query above the backend cap", async () => {
   const provider = await register()
   process.env.DEEPSEEK_API_KEY = "test-key"
   let calls = 0
-  globalThis.fetch = async () => {
-    calls++
-    return { ok: true, status: 200, text: async () => "", json: async () => ({ content: [] }) }
-  }
-  await assert.rejects(() => provider.execute({ query: "a".repeat(8193) }, {}), /at most 8192/)
-  assert.equal(calls, 0)
-
-  globalThis.fetch = async () => ({
+  const ok = async () => ({
     ok: true,
     status: 200,
     text: async () => "",
     json: async () => ({ content: [] }),
   })
+  globalThis.fetch = async () => {
+    calls++
+    return ok()
+  }
+  await assert.rejects(() => provider.execute({ query: "a".repeat(8193) }, {}), /at most 8192/)
+  assert.equal(calls, 0)
+  await assert.rejects(
+    () => provider.execute({ query: "😀".repeat(8193) }, {}),
+    /at most 8192/,
+  )
+  await assert.rejects(
+    () => provider.execute({ query: "a".repeat(1_000_001) }, {}),
+    /too long/,
+  )
+  assert.equal(calls, 0)
+
+  globalThis.fetch = ok
   await provider.execute({ query: "a".repeat(8192) }, {})
+  await provider.execute({ query: " ".repeat(8193) + "hi" }, {})
+  await provider.execute({ query: "😀".repeat(4097) }, {})
 })
 
 test("messages does not return results aborted during response parsing", async () => {
@@ -1958,4 +1977,49 @@ test("native options fall back to environment variables", async () => {
   }
   await provider.execute({ query: "hi" }, {})
   assert.deepEqual(body, { query: "hi", count: 7, need_content: true })
+})
+
+test("API error messages are truncated to 300 characters", async () => {
+  const long = "E".repeat(1000)
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 500,
+    text: async () => long,
+    json: async () => ({}),
+  })
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, {}),
+    (error) => error instanceof Error && error.message.length <= 330,
+  )
+
+  const nativeProvider = await registerWith({ searchApi: "native", apiKey: "k" })
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => "",
+    json: async () => ({ error: { message: long } }),
+  })
+  await assert.rejects(
+    () => nativeProvider.execute({ query: "hi" }, {}),
+    (error) => error instanceof Error && error.message.length <= 330,
+  )
+})
+
+test("configuration errors do not echo provider values", async () => {
+  const secret = "sk-live-" + "S".repeat(200)
+  assert.throws(
+    () => resolveEndpoint({ provider: secret }),
+    (error) => error instanceof Error && !error.message.includes(secret),
+  )
+  let captured
+  await plugin.setup({
+    options: { provider: secret, baseUrl: "https://h/v1/messages" },
+    websearch: { async transform(callback) { callback({ add(provider) { captured = provider }, default: { set() {} } }) } },
+  })
+  await assert.rejects(
+    () => captured.execute({ query: "hi" }, {}),
+    (error) => error instanceof Error && !error.message.includes(secret),
+  )
 })

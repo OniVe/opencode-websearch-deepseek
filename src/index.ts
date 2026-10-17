@@ -56,8 +56,11 @@ export const DEFAULT_COUNT = 10
 /** Maximum number of results accepted by the native Search API. */
 export const MAX_COUNT = 50
 
-/** Maximum query length accepted by the messages backend. */
+/** Maximum query length accepted by the messages backend (code points). */
 export const MAX_MESSAGE_QUERY_LENGTH = 8192
+
+/** Raw UTF-16 length rejected immediately for the messages backend. */
+export const MAX_RAW_MESSAGE_QUERY_LENGTH = 1_000_000
 
 /** Minimum spacing between native API requests (below the 5 QPS limit). */
 export const RATE_LIMIT_INTERVAL_MS = 210
@@ -404,16 +407,6 @@ function pickBoolean(value: unknown): boolean | undefined {
   return undefined
 }
 
-/** True when the trimmed query exceeds 128 code points (fast for huge input). */
-function nativeQueryTooLong(value: string): boolean {
-  if (value.length <= 256) return false
-  const edge = 256
-  // Fast path: non-whitespace at both edges means the trimmed text is huge.
-  if (/\S/.test(value.slice(0, edge)) && /\S/.test(value.slice(-edge))) return true
-  // Padding at an edge: a real trim is required for correctness.
-  return exceedsCodePoints(value.trim(), 128)
-}
-
 /** True when `value` has more than `limit` Unicode code points (early exit). */
 function exceedsCodePoints(value: string, limit: number): boolean {
   // 128 code points cannot exceed 256 UTF-16 units; reject huge inputs in O(1).
@@ -453,6 +446,11 @@ function readEnv(name: string, env: NodeJS.ProcessEnv = process.env): string | u
   return value && value.trim() ? value.trim() : undefined
 }
 
+/** Safe provider label for error messages: known id shape or a neutral phrase. */
+function providerLabel(provider: string): string {
+  return /^[a-z0-9._-]{1,64}$/i.test(provider) ? provider : "configured provider"
+}
+
 /**
  * Resolve the API key, in order of precedence: the `apiKey` plugin option, the
  * provider's environment variables, then the credential OpenCode stores for the
@@ -486,7 +484,7 @@ export async function resolveApiKey(
   } catch (error) {
     if (signal?.aborted) throwCancellation(signal, error)
     // A genuine integration failure is not "no key": surface it with context.
-    throw new Error(`Failed to read the ${integrationID} credential from OpenCode`, { cause: error })
+    throw new Error(`Failed to read the ${providerLabel(integrationID)} credential from OpenCode`, { cause: error })
   }
 }
 
@@ -742,6 +740,7 @@ export function dedupeSources(sources: readonly DeepSeekSource[]): DeepSeekSourc
 /** Only http(s) URLs with a host and no credentials are usable sources. */
 function isHttpSourceUrl(value: string): boolean {
   if (value.length > 8192) return false
+  if (!/^https?:\/\//i.test(value)) return false
   if (/^https?:\/\/[/\\]/i.test(value)) return false
   // Reject raw control/format characters and backslashes that URL parsers normalize.
   if (
@@ -902,7 +901,7 @@ async function requireApiKey(
   const apiKey = await resolveApiKey(ctx, options, signal)
   if (!apiKey) {
     throw new Error(
-      `No API key for provider "${provider}": set its environment variable, pass the apiKey plugin option, or sign in to the "${provider}" provider in OpenCode`,
+      `No API key for provider "${providerLabel(provider)}": set its environment variable, pass the apiKey plugin option, or sign in to the "${providerLabel(provider)}" provider in OpenCode`,
     )
   }
   if (!/^[\x21-\x7e]+$/.test(apiKey)) {
@@ -1063,16 +1062,19 @@ export async function searchDeepSeek(
   searchApi: SearchApi = resolveSearchApi(options),
 ): Promise<{ answer: string; sources: DeepSeekSource[] }> {
   const provider = resolveProvider(options)
-  // Reject oversized native queries before trim, with a bounded scan.
-  if (searchApi === "native" && typeof query === "string" && nativeQueryTooLong(query)) {
-    throw new Error("query must be at most 128 characters for the native search API")
-  }
-  if (searchApi !== "native" && typeof query === "string" && query.length > MAX_MESSAGE_QUERY_LENGTH) {
-    throw new Error(`query must be at most ${MAX_MESSAGE_QUERY_LENGTH} characters`)
+  // Reject absurd raw input before any linear work.
+  if (searchApi !== "native" && typeof query === "string" && query.length > MAX_RAW_MESSAGE_QUERY_LENGTH) {
+    throw new Error("query is too long")
   }
   const trimmedQuery = typeof query === "string" ? query.trim() : ""
   try {
     if (!trimmedQuery) throw new Error("query must be a non-empty string")
+    if (searchApi === "native" && exceedsCodePoints(trimmedQuery, 128)) {
+      throw new Error("query must be at most 128 characters for the native search API")
+    }
+    if (searchApi !== "native" && exceedsCodePoints(trimmedQuery, MAX_MESSAGE_QUERY_LENGTH)) {
+      throw new Error(`query must be at most ${MAX_MESSAGE_QUERY_LENGTH} characters`)
+    }
     // Cancellation wins over configuration and credential lookups.
     if (signal?.aborted) throwCancellation(signal, undefined)
     if (searchApi === "native") {
@@ -1083,7 +1085,9 @@ export async function searchDeepSeek(
     const endpoint = resolveEndpoint(options)
     const { apiKey } = await requireApiKey(ctx, options, signal)
     if (!model) {
-      throw new Error(`No model for provider "${provider}": set the model plugin option or WEBSEARCH_MODEL`)
+      throw new Error(
+        `No model for provider "${providerLabel(provider)}": set the model plugin option or WEBSEARCH_MODEL`,
+      )
     }
 
     const body = buildRequestBody(trimmedQuery, {
@@ -1204,7 +1208,7 @@ export const plugin = {
                   type: "string",
                   minLength: 1,
                   maxLength: MAX_MESSAGE_QUERY_LENGTH,
-                  description: "Search query",
+                  description: "Search query (native mode: up to 128 characters)",
                 },
               },
               required: ["query"],
