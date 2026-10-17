@@ -988,6 +988,7 @@ test("resolveSearchApi defaults to messages and rejects unknown values", () => {
   assert.equal(resolveSearchApi({}), "native")
   delete process.env.WEBSEARCH_SEARCH_API
   assert.throws(() => resolveSearchApi({ searchApi: "web" }), /Invalid searchApi/)
+  assert.throws(() => resolveSearchApi({ searchApi: 5 }), /Invalid searchApi/)
 })
 
 test("resolveSearchBaseUrl prefers the override and derives from baseUrl", () => {
@@ -998,13 +999,33 @@ test("resolveSearchBaseUrl prefers the override and derives from baseUrl", () =>
     "https://api.deepseek.com",
   )
   assert.equal(resolveSearchBaseUrl({ baseUrl: "https://example.com/v1/messages" }), "https://example.com")
+  assert.equal(
+    resolveSearchBaseUrl({ baseUrl: "https://gw.example/proxy/v1/messages" }),
+    "https://gw.example/proxy",
+  )
   assert.equal(resolveSearchBaseUrl({ searchBaseUrl: "https://search.example.com/" }), "https://search.example.com")
+  assert.equal(
+    resolveSearchBaseUrl({ searchBaseUrl: "https://search.example.com/api/" }),
+    "https://search.example.com/api",
+  )
   process.env.WEBSEARCH_SEARCH_BASE_URL = "https://env.example.com"
   assert.equal(resolveSearchBaseUrl({}), "https://env.example.com")
   delete process.env.WEBSEARCH_SEARCH_BASE_URL
   assert.throws(() => resolveSearchBaseUrl({ provider: "anthropic" }), /requires the deepseek provider/)
+  assert.throws(() => resolveSearchBaseUrl({ baseUrl: "https://api.deepseek.com/v1" }), /cannot derive/)
   assert.throws(() => resolveSearchBaseUrl({ searchBaseUrl: "ftp://x" }), /Invalid searchBaseUrl/)
+  assert.throws(() => resolveSearchBaseUrl({ searchBaseUrl: "https://" }), /Invalid searchBaseUrl/)
+  assert.throws(() => resolveSearchBaseUrl({ searchBaseUrl: "https:///v1" }), /Invalid searchBaseUrl/)
+  assert.throws(
+    () => resolveSearchBaseUrl({ searchBaseUrl: "https://user:pass@host/x" }),
+    /credentials are not allowed/,
+  )
   assert.throws(() => resolveSearchBaseUrl({ baseUrl: "ftp://x" }), /Invalid baseUrl/)
+  assert.throws(() => resolveSearchBaseUrl({ baseUrl: "https://" }), /Invalid baseUrl/)
+  assert.throws(
+    () => resolveSearchBaseUrl({ baseUrl: "https://gw.example/v1/messages?x=1" }),
+    /query and fragment are not allowed/,
+  )
 })
 
 test("native numeric and boolean options are clamped with safe defaults", () => {
@@ -1046,10 +1067,22 @@ test("mapNativeResults prefers content, then summary, then snippet", () => {
     ]),
     [
       { url: "https://a", title: "A", content: "sum" },
-      { url: "https://b", title: "https://b", content: "snip b" },
-      { url: "https://c", title: "https://c", content: "page" },
+      { url: "https://b", content: "snip b" },
+      { url: "https://c", content: "page" },
     ],
   )
+  assert.deepEqual(
+    mapNativeResults([
+      { url: "https://d", content: "first" },
+      { url: "https://d", title: "D" },
+    ]),
+    [{ url: "https://d", title: "D", content: "first" }],
+  )
+  const many = Array.from({ length: MAX_COUNT + 10 }, (_, index) => ({
+    url: `https://x/${index}`,
+    title: `T${index}`,
+  }))
+  assert.equal(mapNativeResults(many).length, MAX_COUNT)
   assert.deepEqual(mapNativeResults("oops"), [])
 })
 
@@ -1062,7 +1095,9 @@ test("native search sends Bearer auth and the native request body", async () => 
   })
 
   let seen
+  let calls = 0
   globalThis.fetch = async (url, init) => {
+    calls++
     seen = { url, init }
     return {
       ok: true,
@@ -1080,8 +1115,10 @@ test("native search sends Bearer auth and the native request body", async () => 
   const results = await provider.execute({ query: "  hi  " }, {})
 
   assert.equal(seen.url, SEARCH_URL)
+  assert.equal(calls, 1)
   assert.equal(seen.init.headers.authorization, "Bearer native-key")
   assert.equal(seen.init.headers["x-api-key"], undefined)
+  assert.equal(seen.init.headers["anthropic-version"], undefined)
   assert.deepEqual(JSON.parse(seen.init.body), { query: "hi", count: 4, need_content: true })
   assert.equal(results.length, 2)
   assert.equal(results[0].content, "sum a")
@@ -1219,4 +1256,152 @@ test("Code Mode tool returns native results with an empty answer", async () => {
   assert.equal(result.output.answer, "")
   assert.deepEqual(result.output.sources, [{ url: "https://a", title: "A", content: "sum" }])
   assert.match(result.content, /^Sources:/)
+})
+
+test("native search defaults to count 10, need_content false, and no fetch", async () => {
+  delete process.env.WEBSEARCH_COUNT
+  delete process.env.WEBSEARCH_NEED_CONTENT
+  delete process.env.WEBSEARCH_FETCH
+  const provider = await registerWith({ searchApi: "native", apiKey: "k" })
+
+  let calls = 0
+  let body
+  globalThis.fetch = async (_url, init) => {
+    calls++
+    body = JSON.parse(init.body)
+    return { ok: true, status: 200, text: async () => "", json: async () => ({ results: [] }) }
+  }
+
+  await provider.execute({ query: "hi" }, {})
+  assert.equal(calls, 1)
+  assert.deepEqual(body, { query: "hi", count: 10, need_content: false })
+})
+
+test("native search rejects a query longer than 128 characters", async () => {
+  const provider = await registerWith({ searchApi: "native", apiKey: "k" })
+  let calls = 0
+  globalThis.fetch = async () => {
+    calls++
+    throw new Error("must not be called")
+  }
+  await assert.rejects(() => provider.execute({ query: "x".repeat(129) }, {}), /at most 128/)
+  assert.equal(calls, 0)
+
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => "",
+    json: async () => ({ results: [] }),
+  })
+  await provider.execute({ query: "x".repeat(128) }, {})
+})
+
+test("aborting during fetch enrichment stops the remaining fetches", async () => {
+  const provider = await registerWith({ searchApi: "native", apiKey: "k", count: 2, fetch: 2 })
+  const controller = new AbortController()
+  const calls = []
+  globalThis.fetch = async (url) => {
+    calls.push(url)
+    if (url === SEARCH_URL) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => "",
+        json: async () => ({
+          results: [
+            { url: "https://a", summary: "a" },
+            { url: "https://b", summary: "b" },
+          ],
+        }),
+      }
+    }
+    controller.abort(new Error("mid-fetch"))
+    throw controller.signal.reason
+  }
+
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, { signal: controller.signal }),
+    /mid-fetch/,
+  )
+  assert.equal(calls.filter((url) => url === FETCH_URL).length, 1)
+})
+
+test("native search checks for cancellation after parsing the response", async () => {
+  const provider = await registerWith({ searchApi: "native", apiKey: "k" })
+  const controller = new AbortController()
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => "",
+    json: async () => {
+      controller.abort(new Error("after-json"))
+      return { results: [{ url: "https://a", summary: "a" }] }
+    },
+  })
+
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, { signal: controller.signal }),
+    /after-json/,
+  )
+})
+
+test("fetch enrichment spaces request starts to respect 5 QPS", async () => {
+  const provider = await registerWith({ searchApi: "native", apiKey: "k", count: 2, fetch: 2 })
+  const started = []
+  globalThis.fetch = async (url) => {
+    started.push({ url, at: Date.now() })
+    if (url === SEARCH_URL) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => "",
+        json: async () => ({
+          results: [
+            { url: "https://a", summary: "a" },
+            { url: "https://b", summary: "b" },
+          ],
+        }),
+      }
+    }
+    return { ok: true, status: 200, text: async () => "", json: async () => ({ title: "T", content: "C" }) }
+  }
+
+  await provider.execute({ query: "hi" }, {})
+  const fetches = started.filter((call) => call.url === FETCH_URL)
+  assert.equal(fetches.length, 2)
+  assert.ok(fetches[1].at - fetches[0].at >= 190, "fetch starts must be ~200ms apart")
+})
+
+test("setup snapshots searchApi for later calls", async () => {
+  process.env.WEBSEARCH_SEARCH_API = "native"
+  const provider = await registerWith({ apiKey: "k" })
+  delete process.env.WEBSEARCH_SEARCH_API
+
+  let url
+  globalThis.fetch = async (target) => {
+    url = target
+    return { ok: true, status: 200, text: async () => "", json: async () => ({ results: [] }) }
+  }
+  await provider.execute({ query: "hi" }, {})
+  assert.equal(url, SEARCH_URL)
+})
+
+test("Code Mode tool reports an empty native result set", async () => {
+  let toolDef
+  const fake = {
+    options: { searchApi: "native", apiKey: "k" },
+    websearch: { async transform(callback) { callback({ add() {}, default: { set() {} } }) } },
+    tool: { async transform(callback) { callback({ namespace() {}, add(tool) { toolDef = tool } }) } },
+  }
+  await plugin.setup(fake)
+
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => "",
+    json: async () => ({ results: [] }),
+  })
+  const result = await toolDef.execute({ query: "hi" }, {})
+  assert.deepEqual(result.output, { answer: "", sources: [] })
+  assert.match(result.content, /no results/)
 })

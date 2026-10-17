@@ -140,7 +140,8 @@ from `ctx.options`):
 - **`maxUses` / `thinking`:** option → env var → default.
 - **`searchApi`:** option → `WEBSEARCH_SEARCH_API` → `messages`.
 - **Native base URL:** `options.searchBaseUrl` → env → derived from `baseUrl`
-  (`.../anthropic/v1/messages` → origin) → `https://api.deepseek.com`.
+  by stripping its `/anthropic/v1/messages` or `/v1/messages` suffix (otherwise
+  set `searchBaseUrl`) → `https://api.deepseek.com`.
 - **`count` / `needContent` / `fetch`:** option → env var → default.
 
 OpenCode interpolates `{file:...}` (and `{env:...}`) in config values, so the key
@@ -178,19 +179,26 @@ Messages tool:
   the search response.
 - `fetch: N` then calls `POST /v1/tools/fetch` for the top N results and
   replaces their content with full page Markdown. Fetch is best effort: the
-  search still succeeds if a page cannot be retrieved. Requests are sequential
-  to respect the 5 QPS limit.
+  search still succeeds if a page cannot be retrieved. Request starts are
+  spaced by at least 200 ms (5 QPS per account); failures are reported once via
+  `console.warn`.
 - The native Search API does **not** synthesize an answer, so `answer` is `""`;
   the provider returns the source list and `tools.websearch.search` returns
   `{ answer: "", sources }`. The model reads the source content.
 - The base URL defaults to `https://api.deepseek.com` and can be overridden with
-  `searchBaseUrl`; it is also derived from a custom `baseUrl`
-  (`.../anthropic/v1/messages` → origin). For non-DeepSeek providers set
-  `searchBaseUrl` or keep `searchApi: "messages"`.
-- Billing: $0.75 per 1,000 successful Search requests and $0.75 per 1,000
-  successful Fetch requests (from 2026-11-01), with 5 QPS per account. Query
-  operators (`site:`, `-site:`, `"..."`, `lang:`, `after:`, `before:`) are
-  passed through unchanged.
+  `searchBaseUrl`; it is also derived from a custom `baseUrl` by stripping the
+  `/anthropic/v1/messages` or `/v1/messages` suffix. For non-DeepSeek providers
+  (or base URLs without that suffix) set `searchBaseUrl` or keep
+  `searchApi: "messages"`.
+- Queries are limited to 1–128 Unicode characters by the native API; the plugin
+  rejects longer queries before the request.
+- Billing: direct Search and Fetch calls cost $0.75 per 1,000 successful
+  requests each, with 5 QPS per account. (Server-side tool calls made through
+  Harness/Claude Code/Codex are free until 2026-11-01; this plugin's native mode
+  calls the APIs directly.) Query operators (`site:`, `-site:`, `"..."`,
+  `lang:`, `after:`, `before:`) are passed through unchanged.
+- There is no client-side timeout: a slow page can delay a `fetch` call until
+  the API's own timeout (~30 s per page).
 
 ## Code Mode (execute)
 

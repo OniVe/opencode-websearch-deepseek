@@ -56,6 +56,9 @@ export const DEFAULT_COUNT = 10
 /** Maximum number of results accepted by the native Search API. */
 export const MAX_COUNT = 50
 
+/** Minimum spacing between Fetch requests (5 QPS per account). */
+export const FETCH_MIN_INTERVAL_MS = 200
+
 /** Fallback URL used when a result has no source of its own. */
 export const FALLBACK_URL = "https://api.deepseek.com"
 
@@ -280,13 +283,34 @@ export function resolveProvider(options?: WebsearchOptions): string {
   return readString(options?.provider) ?? DEFAULT_PROVIDER
 }
 
+/** Parse and validate an http(s) URL; rejects empty authorities and credentials. */
+function parseHttpUrl(value: string, label: string): URL {
+  if (/^https?:\/\/[/\\]/i.test(value)) {
+    throw new Error(`Invalid ${label} "${value}": expected an http(s) URL`)
+  }
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    throw new Error(`Invalid ${label} "${value}": expected an http(s) URL`)
+  }
+  if ((url.protocol !== "http:" && url.protocol !== "https:") || !url.hostname) {
+    throw new Error(`Invalid ${label} "${value}": expected an http(s) URL`)
+  }
+  if (url.username || url.password) {
+    throw new Error(`Invalid ${label} "${value}": credentials are not allowed`)
+  }
+  if (url.search || url.hash) {
+    throw new Error(`Invalid ${label} "${value}": query and fragment are not allowed`)
+  }
+  return url
+}
+
 /** Resolve the Messages endpoint for the configured provider. */
 export function resolveEndpoint(options?: WebsearchOptions): string {
   const override = readString(options?.baseUrl)
   if (override) {
-    if (!/^https?:\/\//i.test(override)) {
-      throw new Error(`Invalid baseUrl "${override}": expected an http(s) URL`)
-    }
+    parseHttpUrl(override, "baseUrl")
     return override
   }
   const provider = resolveProvider(options)
@@ -300,7 +324,11 @@ export function resolveEndpoint(options?: WebsearchOptions): string {
  * does not silently fall back to the other backend.
  */
 export function resolveSearchApi(options?: WebsearchOptions): SearchApi {
-  const raw = readString(options?.searchApi) ?? readEnv("WEBSEARCH_SEARCH_API")
+  const value = options?.searchApi
+  if (value !== undefined && value !== null && typeof value !== "string") {
+    throw new Error('Invalid searchApi: expected "messages" or "native"')
+  }
+  const raw = readString(value) ?? readEnv("WEBSEARCH_SEARCH_API")
   if (!raw) return "messages"
   const normalized = raw.toLowerCase()
   if (normalized === "messages" || normalized === "native") return normalized
@@ -310,26 +338,33 @@ export function resolveSearchApi(options?: WebsearchOptions): SearchApi {
 /**
  * Resolve the base URL for the native Search & Fetch APIs. An explicit
  * `searchBaseUrl` wins; otherwise it is derived from a custom Messages
- * endpoint, then from the DeepSeek default.
+ * endpoint (by stripping its `/v1/messages` suffix), then from the DeepSeek
+ * default.
  */
 export function resolveSearchBaseUrl(options?: WebsearchOptions): string {
+  const strip = (value: string) => value.replace(/\/+$/, "")
+
   const override = readString(options?.searchBaseUrl) ?? readEnv("WEBSEARCH_SEARCH_BASE_URL")
   if (override) {
-    if (!/^https?:\/\//i.test(override)) {
-      throw new Error(`Invalid searchBaseUrl "${override}": expected an http(s) URL`)
-    }
-    return override.replace(/\/+$/, "")
+    const url = parseHttpUrl(override, "searchBaseUrl")
+    return `${url.origin}${strip(url.pathname)}`
   }
 
   const baseUrl = readString(options?.baseUrl)
   if (baseUrl) {
-    if (!/^https?:\/\//i.test(baseUrl)) {
-      throw new Error(`Invalid baseUrl "${baseUrl}": expected an http(s) URL`)
+    const url = parseHttpUrl(baseUrl, "baseUrl")
+    const path = strip(url.pathname)
+    const suffix = /\/anthropic\/v1\/messages$/i.test(path)
+      ? /\/anthropic\/v1\/messages$/i
+      : /\/v1\/messages$/i.test(path)
+        ? /\/v1\/messages$/i
+        : undefined
+    if (!suffix) {
+      throw new Error(
+        `searchApi "native" cannot derive a base URL from baseUrl "${baseUrl}": set the searchBaseUrl plugin option`,
+      )
     }
-    return baseUrl
-      .replace(/\/anthropic\/v1\/messages\/?$/i, "")
-      .replace(/\/v1\/messages\/?$/i, "")
-      .replace(/\/+$/, "")
+    return `${url.origin}${strip(path.replace(suffix, ""))}`
   }
 
   if (resolveProvider(options) === DEFAULT_PROVIDER) return NATIVE_BASE_URL
@@ -513,6 +548,25 @@ function withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
   })
 }
 
+/** Resolve after `ms`, or reject with the signal's reason when aborted. */
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(signal.reason ?? new Error("The web search was aborted"))
+  }
+  return new Promise<void>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout>
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(signal?.reason ?? new Error("The web search was aborted"))
+    }
+    timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort)
+      resolve()
+    }, ms)
+    signal?.addEventListener("abort", onAbort, { once: true })
+  })
+}
+
 /** Resolve `promise`, or `undefined` if it does not settle within `ms`. */
 async function raceTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -632,12 +686,15 @@ export function dedupeSources(sources: readonly DeepSeekSource[]): DeepSeekSourc
 export function mapNativeResults(results: unknown): DeepSeekSource[] {
   if (!Array.isArray(results)) return []
   const mapped: DeepSeekSource[] = []
-  for (const item of results as Array<Record<string, unknown>>) {
+  // The API caps `count` at 50; never process more than that even if a proxy
+  // returns an unexpectedly large array.
+  for (const item of results.slice(0, MAX_COUNT) as Array<Record<string, unknown>>) {
     const url = readString(item?.url)
     if (!url) continue
     const content =
       readString(item.content) ?? readString(item.summary) ?? readString(item.snippet) ?? ""
-    mapped.push({ url, title: readString(item.title) ?? url, content })
+    const title = readString(item.title)
+    mapped.push(title ? { url, title, content } : { url, content })
   }
   return dedupeSources(mapped)
 }
@@ -824,7 +881,7 @@ async function fetchNativePage(
   }
 }
 
-/** Replace the top-N snippets with full page Markdown, sequentially (5 QPS). */
+/** Replace the top-N snippets with full page Markdown, respecting 5 QPS. */
 async function enrichWithFetch(
   baseUrl: string,
   apiKey: string,
@@ -834,16 +891,31 @@ async function enrichWithFetch(
 ): Promise<DeepSeekSource[]> {
   const enriched = [...sources]
   const count = Math.min(limit, enriched.length)
+  let lastFetch = 0
+  let failed = 0
   for (let index = 0; index < count; index++) {
+    if (lastFetch > 0) {
+      const wait = FETCH_MIN_INTERVAL_MS - (Date.now() - lastFetch)
+      if (wait > 0) await abortableDelay(wait, signal)
+    }
+    lastFetch = Date.now()
     const source = enriched[index]
     if (!source) continue
     const page = await fetchNativePage(baseUrl, apiKey, source.url, signal)
-    if (!page) continue
+    if (!page) {
+      failed++
+      continue
+    }
     enriched[index] = {
       ...source,
       title: page.title || source.title,
       content: page.content || source.content,
     }
+  }
+  if (failed > 0) {
+    console.warn(
+      `[opencode-websearch-deepseek] fetch enrichment failed for ${failed} of ${count} results`,
+    )
   }
   return enriched
 }
@@ -855,6 +927,10 @@ async function nativeSearch(
   query: string,
   signal?: AbortSignal,
 ): Promise<{ answer: string; sources: DeepSeekSource[] }> {
+  // The native Search API accepts 1-128 Unicode characters.
+  if ([...query].length > 128) {
+    throw new Error("query must be at most 128 characters for the native search API")
+  }
   const { apiKey } = await requireApiKey(ctx, options, signal)
   const baseUrl = resolveSearchBaseUrl(options)
   const count = pickIntegerInRange(options.count, 1, MAX_COUNT) ?? resolveCount(readEnv("WEBSEARCH_COUNT"))
@@ -887,12 +963,13 @@ export async function searchDeepSeek(
   model: string | undefined,
   query: string,
   signal?: AbortSignal,
+  searchApi: SearchApi = resolveSearchApi(options),
 ): Promise<{ answer: string; sources: DeepSeekSource[] }> {
   const provider = resolveProvider(options)
   const trimmedQuery = typeof query === "string" ? query.trim() : ""
   try {
     if (!trimmedQuery) throw new Error("query must be a non-empty string")
-    if (resolveSearchApi(options) === "native") {
+    if (searchApi === "native") {
       return await nativeSearch(ctx, options, trimmedQuery, signal)
     }
 
@@ -979,7 +1056,14 @@ export const plugin = {
         name: providerDisplay(provider),
         execute: async ({ query }, context) => {
           const model = await getModel()
-          const { answer, sources } = await searchDeepSeek(ctx, options, model, query, context?.signal)
+          const { answer, sources } = await searchDeepSeek(
+            ctx,
+            options,
+            model,
+            query,
+            context?.signal,
+            searchApi,
+          )
           return toResults(answer, sources)
         },
       })
@@ -1024,8 +1108,18 @@ export const plugin = {
             execute: async (input: { query?: unknown }, context: { signal?: AbortSignal }) => {
               const query = typeof input?.query === "string" ? input.query : ""
               const model = await getModel()
-              const { answer, sources } = await searchDeepSeek(ctx, options, model, query, context?.signal)
-              return { output: { answer, sources: toSourceObjects(sources) }, content: toContent(answer, sources) }
+              const { answer, sources } = await searchDeepSeek(
+                ctx,
+                options,
+                model,
+                query,
+                context?.signal,
+                searchApi,
+              )
+              return {
+                output: { answer, sources: toSourceObjects(sources) },
+                content: toContent(answer, sources) || "The search returned no results.",
+              }
             },
           })
         })
