@@ -1404,14 +1404,14 @@ test("native search checks for cancellation after parsing the response", async (
     status: 200,
     text: async () => "",
     json: async () => {
-      controller.abort(new Error("after-json"))
+      controller.abort("after-json")
       return { results: [{ url: "https://a", summary: "a" }] }
     },
   })
 
   await assert.rejects(
     () => provider.execute({ query: "hi" }, { signal: controller.signal }),
-    /after-json/,
+    (error) => error instanceof Error && /after-json/.test(error.message),
   )
 })
 
@@ -1936,13 +1936,13 @@ test("messages does not return results aborted during response parsing", async (
     status: 200,
     text: async () => "",
     json: async () => {
-      controller.abort(new Error("abort-after-body"))
+      controller.abort("abort-after-body")
       return { content: [{ type: "text", text: "answer" }] }
     },
   })
   await assert.rejects(
     () => provider.execute({ query: "hi" }, { signal: controller.signal }),
-    /abort-after-body/,
+    (error) => error instanceof Error && /abort-after-body/.test(error.message),
   )
 })
 
@@ -2030,6 +2030,22 @@ test("configuration errors do not echo provider values", async () => {
 test("messages surfaces a web search tool error", async () => {
   const provider = await register()
   process.env.DEEPSEEK_API_KEY = "test-key"
+  const blocks = [
+    { type: "web_search_tool_result", content: { type: "web_search_tool_result_error", error_code: "max_uses_exceeded" } },
+    { type: "web_search_tool_result", content: { type: "web_search_tool_result_error" } },
+    { type: "web_search_tool_result", content: { type: "web_search_tool_result_error", error_code: "" } },
+    { type: "web_search_tool_result", content: [{ type: "web_search_tool_result_error", error_code: "unavailable" }] },
+  ]
+  for (const block of blocks) {
+    globalThis.fetch = async () => ({
+      ok: true,
+      status: 200,
+      text: async () => "",
+      json: async () => ({ content: [block] }),
+    })
+    await assert.rejects(() => provider.execute({ query: "hi" }, {}), /Web search error:/)
+  }
+
   globalThis.fetch = async () => ({
     ok: true,
     status: 200,
@@ -2038,12 +2054,15 @@ test("messages surfaces a web search tool error", async () => {
       content: [
         {
           type: "web_search_tool_result",
-          content: { type: "web_search_tool_result_error", error_code: "max_uses_exceeded" },
+          content: { type: "web_search_tool_result_error", error_code: "E".repeat(1000) },
         },
       ],
     }),
   })
-  await assert.rejects(() => provider.execute({ query: "hi" }, {}), /max_uses_exceeded/)
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, {}),
+    (error) => error instanceof Error && error.message.length <= 330,
+  )
 })
 
 test("tool schema advertises the backend query limit", async () => {
@@ -2061,4 +2080,63 @@ test("tool schema advertises the backend query limit", async () => {
   toolDef = undefined
   await plugin.setup(fake({ apiKey: "k" }))
   assert.equal(toolDef.input.properties.query.maxLength, 8192)
+})
+
+test("unknown provider gets a neutral display name", async () => {
+  let captured
+  await plugin.setup({
+    options: { provider: "custom-x", baseUrl: "https://h/v1/messages", apiKey: "k" },
+    websearch: { async transform(callback) { callback({ add(provider) { captured = provider }, default: { set() {} } }) } },
+  })
+  assert.equal(captured.name, "Web Search")
+  assert.doesNotMatch(captured.name, /custom-x/)
+})
+
+test("plain AbortError-like objects are wrapped", async () => {
+  const provider = await registerWith({ searchApi: "native", apiKey: "k" })
+  const controller = new AbortController()
+  controller.abort({ name: "AbortError", message: "spoofed" })
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, { signal: controller.signal }),
+    (error) =>
+      error instanceof Error && !(error instanceof DOMException) && /aborted/.test(error.message),
+  )
+})
+
+test("model lookup timer is cleared on abort", async () => {
+  let captured
+  await plugin.setup({
+    options: { provider: "anthropic", apiKey: "k" },
+    model: {
+      async default() {
+        await new Promise((resolve) => setTimeout(resolve, 600))
+        return { providerID: "other", modelID: "x" }
+      },
+    },
+    websearch: { async transform(callback) { callback({ add(provider) { captured = provider }, default: { set() {} } }) } },
+  })
+
+  const originalSet = globalThis.setTimeout
+  const originalClear = globalThis.clearTimeout
+  let lookupTimer
+  let cleared = false
+  globalThis.setTimeout = (fn, ms, ...args) => {
+    const handle = originalSet(fn, ms, ...args)
+    if (ms === 2000) lookupTimer = handle
+    return handle
+  }
+  globalThis.clearTimeout = (handle) => {
+    if (handle === lookupTimer) cleared = true
+    return originalClear(handle)
+  }
+  try {
+    const controller = new AbortController()
+    const call = captured.execute({ query: "hi" }, { signal: controller.signal })
+    originalSet(() => controller.abort(new Error("timer-abort")), 10)
+    await assert.rejects(() => call, /timer-abort/)
+  } finally {
+    globalThis.setTimeout = originalSet
+    globalThis.clearTimeout = originalClear
+  }
+  assert.equal(cleared, true)
 })

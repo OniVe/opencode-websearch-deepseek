@@ -521,24 +521,14 @@ export async function resolveModel(
 }
 
 /**
- * Rethrow the cancellation reason from `signal`. `Error` and `AbortError`
- * objects (e.g. `DOMException`) are preserved as-is; other reasons are
- * normalised to an `Error` so callers always receive one.
+ * Rethrow the cancellation reason from `signal`. Real `Error`/`DOMException`
+ * instances are preserved; all other reasons are normalised to an `Error`.
  */
 function throwCancellation(signal: AbortSignal, fallback: unknown): never {
   const reason: unknown = signal.reason
   if (reason instanceof Error) throw reason
+  if (typeof DOMException !== "undefined" && reason instanceof DOMException) throw reason
   if (typeof reason === "object" && reason !== null) {
-    // Preserve AbortError-like objects (DOMException has a message); wrap the
-    // rest. Guard the property reads: a hostile reason may throw from a getter.
-    try {
-      const candidate = reason as { name?: unknown; message?: unknown }
-      if (candidate.name === "AbortError" && typeof candidate.message === "string" && candidate.message) {
-        throw reason
-      }
-    } catch (error) {
-      if (error === reason) throw error
-    }
     throw new Error("The web search was aborted", { cause: reason })
   }
   if (typeof reason === "string" && reason.trim()) throw new Error(reason.trim())
@@ -816,23 +806,25 @@ export function extractAnswerAndSources(data: DeepSeekResponse): {
   let toolError: string | undefined
 
   for (const block of blocks) {
-    if (block?.type === "web_search_tool_result" && !Array.isArray(block.content)) {
-      const content = block.content as { type?: unknown; error_code?: unknown } | undefined
-      if (content && content.type === "web_search_tool_result_error") {
-        toolError =
-          typeof content.error_code === "string" ? content.error_code : "web_search_tool_result_error"
-      }
-      continue
-    }
-    if (block?.type === "web_search_tool_result" && Array.isArray(block.content)) {
-      for (const item of block.content as Array<Record<string, unknown>>) {
-        if (item?.type === "web_search_result" && typeof item.url === "string") {
-          const url = item.url.trim()
-          if (!url) continue
-          collected.push({
-            url,
-            title: typeof item.title === "string" ? item.title : url,
-          })
+    if (block?.type === "web_search_tool_result") {
+      if (Array.isArray(block.content)) {
+        for (const item of block.content as Array<Record<string, unknown>>) {
+          if (item?.type === "web_search_tool_result_error") {
+            toolError = remoteMessage(item.error_code, "web_search_tool_result_error")
+          }
+          if (item?.type === "web_search_result" && typeof item.url === "string") {
+            const url = item.url.trim()
+            if (!url) continue
+            collected.push({
+              url,
+              title: typeof item.title === "string" ? item.title : url,
+            })
+          }
+        }
+      } else {
+        const content = block.content as { type?: unknown; error_code?: unknown } | undefined
+        if (content && content.type === "web_search_tool_result_error") {
+          toolError = remoteMessage(content.error_code, "web_search_tool_result_error")
         }
       }
     } else if (block?.type === "text" && typeof block.text === "string" && block.text.trim()) {
@@ -949,6 +941,12 @@ function extractErrorMessage(text: string): string {
   return text
 }
 
+/** Normalize a remote error code/message for an error string. */
+function remoteMessage(value: unknown, fallback: string): string {
+  const text = typeof value === "string" && value.trim() ? value.trim() : fallback
+  return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").slice(0, 300)
+}
+
 /** POST JSON to a native DeepSeek tool endpoint and parse the response. */
 async function postNativeTool(
   url: string,
@@ -1062,7 +1060,7 @@ async function nativeSearch(
   if (!data || !Array.isArray(data.results)) {
     const message = (data as { error?: { message?: unknown } } | undefined)?.error?.message
     if (typeof message === "string" && message.trim()) {
-      throw new Error(`Web search API error: ${message.trim().slice(0, 300)}`)
+      throw new Error(`Web search API error: ${remoteMessage(message, "unknown error")}`)
     }
     throw new Error("Web search API returned no results array")
   }
@@ -1155,7 +1153,7 @@ export async function searchDeepSeek(
     if (!data || !Array.isArray(data.content)) {
       const message = (data as { error?: { message?: unknown } } | undefined)?.error?.message
       if (typeof message === "string" && message.trim()) {
-        throw new Error(`Web search API error: ${message.trim().slice(0, 300)}`)
+        throw new Error(`Web search API error: ${remoteMessage(message, "unknown error")}`)
       }
       throw new Error("Web search API returned an invalid response")
     }
