@@ -285,7 +285,7 @@ export function resolveProvider(options?: WebsearchOptions): string {
 
 /** Hide userinfo before echoing a URL in an error message. */
 function redactUrl(value: string): string {
-  return value.replace(/\/\/[^/@]*@/, "//<redacted>@")
+  return value.replace(/\/\/[^/]*@/, "//<redacted>@")
 }
 
 /** Parse and validate an http(s) URL; rejects empty authorities and credentials. */
@@ -353,7 +353,11 @@ export function resolveSearchBaseUrl(options?: WebsearchOptions): string {
   const override = readString(options?.searchBaseUrl) ?? readEnv("WEBSEARCH_SEARCH_BASE_URL")
   if (override) {
     const url = parseHttpUrl(override, "searchBaseUrl")
-    return `${url.origin}${strip(url.pathname)}`
+    const path = strip(url.pathname)
+    if (/\/v1$/i.test(path)) {
+      throw new Error(`Invalid searchBaseUrl "${redactUrl(override)}": use the API root without /v1`)
+    }
+    return `${url.origin}${path}`
   }
 
   const baseUrl = readString(options?.baseUrl)
@@ -573,17 +577,29 @@ function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
   })
 }
 
-/** Process-wide pacer: the DeepSeek limits are per account, not per call. */
+/** Process-wide pacer: serialize slots and measure from the actual start. */
 function createRateLimiter(intervalMs: number) {
   let last = 0
+  let tail: Promise<void> = Promise.resolve()
   return {
-    async next(signal?: AbortSignal): Promise<void> {
-      if (signal?.aborted) {
-        throw signal.reason ?? new Error("The web search was aborted")
-      }
-      const wait = last === 0 ? 0 : intervalMs - (Date.now() - last)
-      if (wait > 0) await abortableDelay(wait, signal)
-      last = Date.now()
+    next(signal?: AbortSignal): Promise<void> {
+      const run = tail.then(async () => {
+        if (signal?.aborted) {
+          throw signal.reason ?? new Error("The web search was aborted")
+        }
+        if (last > 0) {
+          // `performance.now()` is monotonic, so clock jumps cannot extend a wait.
+          const wait = intervalMs - (performance.now() - last)
+          if (wait > 0) await abortableDelay(wait, signal)
+        }
+        if (signal?.aborted) {
+          throw signal.reason ?? new Error("The web search was aborted")
+        }
+        last = performance.now()
+      })
+      // Keep the chain alive after a cancellation so later callers still run.
+      tail = run.catch(() => {})
+      return run
     },
   }
 }
@@ -685,12 +701,13 @@ export function buildRequestBody(query: string, options: BuildRequestOptions): R
 
 /**
  * Merge duplicate sources by URL while preserving first-seen order. Missing
- * `title`/`content` fields are filled from later duplicates.
+ * `title`/`content` fields are filled from later duplicates; invalid and
+ * non-http(s) URLs are dropped.
  */
 export function dedupeSources(sources: readonly DeepSeekSource[]): DeepSeekSource[] {
   const byUrl = new Map<string, DeepSeekSource>()
   for (const source of Array.isArray(sources) ? sources : []) {
-    if (typeof source?.url !== "string" || source.url.length === 0) continue
+    if (typeof source?.url !== "string" || !isHttpSourceUrl(source.url)) continue
     const existing = byUrl.get(source.url)
     if (!existing) {
       byUrl.set(source.url, { ...source })
@@ -1008,6 +1025,8 @@ export async function searchDeepSeek(
   const trimmedQuery = typeof query === "string" ? query.trim() : ""
   try {
     if (!trimmedQuery) throw new Error("query must be a non-empty string")
+    // Cancellation wins over configuration and credential lookups.
+    if (signal?.aborted) throwCancellation(signal, undefined)
     if (searchApi === "native") {
       return await nativeSearch(ctx, options, trimmedQuery, signal)
     }

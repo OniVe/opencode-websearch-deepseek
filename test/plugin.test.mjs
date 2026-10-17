@@ -1023,8 +1023,22 @@ test("resolveSearchBaseUrl prefers the override and derives from baseUrl", () =>
   assert.throws(() => resolveSearchBaseUrl({ searchBaseUrl: "https://" }), /Invalid searchBaseUrl/)
   assert.throws(() => resolveSearchBaseUrl({ searchBaseUrl: "https:///v1" }), /Invalid searchBaseUrl/)
   assert.throws(
-    () => resolveSearchBaseUrl({ searchBaseUrl: "https://user:pass@host/x" }),
-    /credentials are not allowed/,
+    () => resolveSearchBaseUrl({ searchBaseUrl: "https://user:topsecret@host/x" }),
+    (error) =>
+      error instanceof Error &&
+      /credentials are not allowed/.test(error.message) &&
+      !error.message.includes("topsecret"),
+  )
+  assert.throws(
+    () => resolveSearchBaseUrl({ searchBaseUrl: "https://user:pa@ss@host/x" }),
+    (error) =>
+      error instanceof Error &&
+      !error.message.includes("pa@ss") &&
+      !error.message.includes("@ss"),
+  )
+  assert.throws(
+    () => resolveSearchBaseUrl({ searchBaseUrl: "https://x.example/v1" }),
+    /without \/v1/,
   )
   assert.throws(() => resolveSearchBaseUrl({ baseUrl: "ftp://x" }), /Invalid baseUrl/)
   assert.throws(() => resolveSearchBaseUrl({ baseUrl: "https://" }), /Invalid baseUrl/)
@@ -1405,14 +1419,22 @@ test("request pacing is shared by concurrent calls", async () => {
   await Promise.all([
     provider.execute({ query: "first" }, {}),
     provider.execute({ query: "second" }, {}),
+    provider.execute({ query: "third" }, {}),
   ])
 
   const searchStarts = started.filter((call) => call.url === SEARCH_URL).map((call) => call.at)
   const fetchStarts = started.filter((call) => call.url === FETCH_URL).map((call) => call.at)
-  assert.equal(searchStarts.length, 2)
-  assert.equal(fetchStarts.length, 2)
-  assert.ok(searchStarts[1] - searchStarts[0] >= 195, "concurrent searches must be paced")
-  assert.ok(fetchStarts[1] - fetchStarts[0] >= 195, "concurrent fetches must be paced")
+  assert.equal(searchStarts.length, 3)
+  assert.equal(fetchStarts.length, 3)
+  for (let index = 1; index < searchStarts.length; index++) {
+    assert.ok(
+      searchStarts[index] - searchStarts[index - 1] >= 195,
+      "concurrent searches must be paced",
+    )
+  }
+  for (let index = 1; index < fetchStarts.length; index++) {
+    assert.ok(fetchStarts[index] - fetchStarts[index - 1] >= 195, "concurrent fetches must be paced")
+  }
 })
 
 test("setup snapshots searchApi for later calls", async () => {
@@ -1498,7 +1520,11 @@ test("native fetch failures produce one warning without the key", async () => {
 test("aborting during the fetch pacing delay stops the run", async () => {
   const provider = await registerWith({ searchApi: "native", apiKey: "k", count: 3, fetch: 3 })
   const controller = new AbortController()
+  const warnings = []
+  const originalWarn = console.warn
+  console.warn = (...args) => warnings.push(args.join(" "))
   let fetchCalls = 0
+  let firstFetchAt = 0
   globalThis.fetch = async (url) => {
     if (url === SEARCH_URL) {
       return {
@@ -1515,15 +1541,24 @@ test("aborting during the fetch pacing delay stops the run", async () => {
       }
     }
     fetchCalls++
-    if (fetchCalls === 1) setTimeout(() => controller.abort(new Error("gap-abort")), 50)
+    if (fetchCalls === 1) {
+      firstFetchAt = Date.now()
+      setTimeout(() => controller.abort(new Error("gap-abort")), 50)
+    }
     return { ok: true, status: 200, text: async () => "", json: async () => ({ title: "T", content: "C" }) }
   }
 
-  await assert.rejects(
-    () => provider.execute({ query: "hi" }, { signal: controller.signal }),
-    /gap-abort/,
-  )
+  try {
+    await assert.rejects(
+      () => provider.execute({ query: "hi" }, { signal: controller.signal }),
+      /gap-abort/,
+    )
+  } finally {
+    console.warn = originalWarn
+  }
   assert.equal(fetchCalls, 1)
+  assert.ok(Date.now() - firstFetchAt < 150, "abort must not wait for the 200ms slot")
+  assert.equal(warnings.length, 0, "an aborted run must not warn about fetch failures")
 })
 
 test("aborting on the last fetch rejects instead of succeeding", async () => {
@@ -1560,4 +1595,56 @@ test("mapNativeResults drops non-http and credential URLs", () => {
     ]),
     [{ url: "https://ok.example/x", title: "OK", content: "sum" }],
   )
+})
+
+test("messages sources drop non-http URLs", () => {
+  const { sources } = extractAnswerAndSources({
+    content: [
+      {
+        type: "text",
+        text: "answer",
+        citations: [
+          { url: "javascript:alert(1)", cited_text: "x" },
+          { url: "https://ok.example/x", cited_text: "snippet" },
+        ],
+      },
+      {
+        type: "web_search_tool_result",
+        content: [
+          { type: "web_search_result", url: "file:///etc/passwd", title: "F" },
+          { type: "web_search_result", url: "https://ok.example/x", title: "OK" },
+        ],
+      },
+    ],
+  })
+  assert.deepEqual(sources, [{ url: "https://ok.example/x", title: "OK", content: "snippet" }])
+})
+
+test("pre-abort wins before the credential lookup", async () => {
+  let activeCalls = 0
+  let captured
+  const controller = new AbortController()
+  controller.abort(new Error("pre-credential"))
+
+  await plugin.setup({
+    options: { searchApi: "native" },
+    integration: {
+      connection: {
+        async active() {
+          activeCalls++
+          return {}
+        },
+        async resolve() {
+          return { key: "k" }
+        },
+      },
+    },
+    websearch: { async transform(callback) { callback({ add(provider) { captured = provider }, default: { set() {} } }) } },
+  })
+
+  await assert.rejects(
+    () => captured.execute({ query: "hi" }, { signal: controller.signal }),
+    /pre-credential/,
+  )
+  assert.equal(activeCalls, 0)
 })
