@@ -2030,20 +2030,35 @@ test("configuration errors do not echo provider values", async () => {
 test("messages surfaces a web search tool error", async () => {
   const provider = await register()
   process.env.DEEPSEEK_API_KEY = "test-key"
-  const blocks = [
-    { type: "web_search_tool_result", content: { type: "web_search_tool_result_error", error_code: "max_uses_exceeded" } },
-    { type: "web_search_tool_result", content: { type: "web_search_tool_result_error" } },
-    { type: "web_search_tool_result", content: { type: "web_search_tool_result_error", error_code: "" } },
-    { type: "web_search_tool_result", content: [{ type: "web_search_tool_result_error", error_code: "unavailable" }] },
+  const cases = [
+    [
+      { type: "web_search_tool_result", content: { type: "web_search_tool_result_error", error_code: "max_uses_exceeded" } },
+      /max_uses_exceeded/,
+    ],
+    [
+      { type: "web_search_tool_result", content: { type: "web_search_tool_result_error" } },
+      /web_search_tool_result_error/,
+    ],
+    [
+      { type: "web_search_tool_result", content: { type: "web_search_tool_result_error", error_code: "   " } },
+      /web_search_tool_result_error/,
+    ],
+    [
+      { type: "web_search_tool_result", content: [{ type: "web_search_tool_result_error", error_code: "unavailable" }] },
+      /unavailable/,
+    ],
   ]
-  for (const block of blocks) {
+  for (const [block, expected] of cases) {
     globalThis.fetch = async () => ({
       ok: true,
       status: 200,
       text: async () => "",
       json: async () => ({ content: [block] }),
     })
-    await assert.rejects(() => provider.execute({ query: "hi" }, {}), /Web search error:/)
+    await assert.rejects(
+      () => provider.execute({ query: "hi" }, {}),
+      (error) => error instanceof Error && expected.test(error.message),
+    )
   }
 
   globalThis.fetch = async () => ({
@@ -2139,4 +2154,34 @@ test("model lookup timer is cleared on abort", async () => {
     globalThis.clearTimeout = originalClear
   }
   assert.equal(cleared, true)
+})
+
+test("non-2xx bodies are sanitized", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 500,
+    text: async () => "denied\u0000\u001b[31mred\u0007\u202e\u2028text",
+    json: async () => ({}),
+  })
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, {}),
+    (error) =>
+      error instanceof Error &&
+      !/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e]/.test(error.message),
+  )
+})
+
+test("fetch abort reasons are normalized mid-flight", async () => {
+  const provider = await registerWith({ searchApi: "native", apiKey: "k" })
+  const controller = new AbortController()
+  globalThis.fetch = async () => {
+    controller.abort("raw-fetch")
+    throw controller.signal.reason
+  }
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, { signal: controller.signal }),
+    (error) => error instanceof Error && /raw-fetch/.test(error.message),
+  )
 })

@@ -944,7 +944,12 @@ function extractErrorMessage(text: string): string {
 /** Normalize a remote error code/message for an error string. */
 function remoteMessage(value: unknown, fallback: string): string {
   const text = typeof value === "string" && value.trim() ? value.trim() : fallback
-  return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").slice(0, 300)
+  const head = text.slice(0, 4096)
+  const sanitized = head.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]|\p{Cf}/gu, " ")
+  return Array.from(sanitized)
+    .slice(0, 300)
+    .join("")
+    .replace(/[\uD800-\uDBFF]$/, "")
 }
 
 /** POST JSON to a native DeepSeek tool endpoint and parse the response. */
@@ -970,7 +975,9 @@ async function postNativeTool(
       return `[body read failed: ${detail}]`
     })
     if (signal?.aborted) throwCancellation(signal, undefined)
-    throw new Error(`Web search API error ${response.status}: ${extractErrorMessage(text).slice(0, 300)}`)
+    throw new Error(
+      `Web search API error ${response.status}: ${remoteMessage(extractErrorMessage(text.slice(0, 4096)), "unknown error")}`,
+    )
   }
 
   const data = (await response.json()) as unknown
@@ -1144,7 +1151,9 @@ export async function searchDeepSeek(
       // An abort can also arrive after the body resolves; re-check so it is
       // not masked as an API error.
       if (signal?.aborted) throwCancellation(signal, undefined)
-      throw new Error(`Web search API error ${response.status}: ${text.slice(0, 300)}`)
+      throw new Error(
+        `Web search API error ${response.status}: ${remoteMessage(extractErrorMessage(text.slice(0, 4096)), "unknown error")}`,
+      )
     }
 
     const data = (await response.json()) as DeepSeekResponse
