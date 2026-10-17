@@ -1345,6 +1345,19 @@ test("native search rejects a query longer than 128 characters", async () => {
     json: async () => ({ results: [] }),
   })
   await provider.execute({ query: "x".repeat(128) }, {})
+  await provider.execute({ query: "😀".repeat(128) }, {})
+  await assert.rejects(() => provider.execute({ query: "😀".repeat(129) }, {}), /at most 128/)
+})
+
+test("native search trims padding without rejecting a short query", async () => {
+  const provider = await registerWith({ searchApi: "native", apiKey: "k" })
+  let body
+  globalThis.fetch = async (_url, init) => {
+    body = JSON.parse(init.body)
+    return { ok: true, status: 200, text: async () => "", json: async () => ({ results: [] }) }
+  }
+  await provider.execute({ query: " ".repeat(300) + "hello" }, {})
+  assert.equal(body.query, "hello")
 })
 
 test("aborting during fetch enrichment stops the remaining fetches", async () => {
@@ -1689,10 +1702,10 @@ test("pre-abort wins before the credential lookup", async () => {
 test("aborting a queued caller rejects without waiting for its slot", async () => {
   const provider = await registerWith({ searchApi: "native", apiKey: "k", count: 1 })
   const controller = new AbortController()
-  let searches = 0
-  globalThis.fetch = async (url) => {
+  const bodies = []
+  globalThis.fetch = async (url, init) => {
     if (url === SEARCH_URL) {
-      searches++
+      bodies.push(JSON.parse(init.body).query)
       return { ok: true, status: 200, text: async () => "", json: async () => ({ results: [] }) }
     }
     return { ok: true, status: 200, text: async () => "", json: async () => ({ title: "T", content: "C" }) }
@@ -1712,7 +1725,11 @@ test("aborting a queued caller rejects without waiting for its slot", async () =
   assert.ok(Date.now() - abortAt < 100, "queued abort must not wait for its slot")
   await Promise.all([first, second, third])
   await new Promise((resolve) => setTimeout(resolve, 320))
-  assert.equal(searches, 3)
+  assert.deepEqual(bodies, ["first", "second", "third"])
+
+  // The chain must stay alive after a queued cancellation.
+  await provider.execute({ query: "after" }, {})
+  assert.deepEqual(bodies, ["first", "second", "third", "after"])
 })
 
 test("native search rejects a huge query without scanning it", async () => {
@@ -1748,6 +1765,9 @@ test("URL validation rejects control characters and backslashes", () => {
       { url: "https:\\ok.example\\a", title: "z" },
       { url: "https://ok.example/a\u0085b", title: "nel" },
       { url: "https://ok.example/a\u200bb", title: "zw" },
+      { url: "https://ok.example/a\u2060b", title: "wj" },
+      { url: "https://ok.example/a\u00adb", title: "shy" },
+      { url: "https:///x", title: "empty-authority" },
       { url: "https://ok.example/ok", title: "OK" },
     ]),
     [{ url: "https://ok.example/ok", title: "OK", content: "" }],
@@ -1814,4 +1834,52 @@ test("native search rejects a 200 response without a results array", async () =>
     json: async () => ({ error: { message: "bad endpoint" } }),
   })
   await assert.rejects(() => provider.execute({ query: "hi" }, {}), /bad endpoint/)
+})
+
+test("messages rejects a 200 response without content", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => "",
+    json: async () => ({ type: "error", error: { message: "Overloaded" } }),
+  })
+  await assert.rejects(() => provider.execute({ query: "hi" }, {}), /Overloaded/)
+
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => "",
+    json: async () => ({ content: [] }),
+  })
+  const results = await provider.execute({ query: "hi" }, {})
+  assert.equal(results[0].content, "The search returned no results.")
+})
+
+test("tool pre-abort skips the lazy model lookup", async () => {
+  let modelCalls = 0
+  let toolDef
+  await plugin.setup({
+    options: { provider: "anthropic", apiKey: "k" },
+    model: {
+      async default() {
+        modelCalls++
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        return { providerID: "other", modelID: "x" }
+      },
+    },
+    websearch: { async transform(callback) { callback({ add() {}, default: { set() {} } }) } },
+    tool: { async transform(callback) { callback({ namespace() {}, add(tool) { toolDef = tool } }) } },
+  })
+  const afterSetup = modelCalls
+  const controller = new AbortController()
+  controller.abort(new Error("pre-tool-model"))
+  const started = Date.now()
+  await assert.rejects(
+    () => toolDef.execute({ query: "hi" }, { signal: controller.signal }),
+    /pre-tool-model/,
+  )
+  assert.ok(Date.now() - started < 50)
+  assert.equal(modelCalls, afterSetup)
 })

@@ -283,33 +283,25 @@ export function resolveProvider(options?: WebsearchOptions): string {
   return readString(options?.provider) ?? DEFAULT_PROVIDER
 }
 
-/** Hide userinfo and query/fragment before echoing a URL in an error message. */
-function redactUrl(value: string): string {
-  return value
-    .replace(/^((?:[a-z][a-z0-9+.-]*:)?[/\\]*)[^/\\]*@/i, "$1<redacted>@")
-    .replace(/[?#][\s\S]*$/, "")
-}
-
 /** Parse and validate an http(s) URL; rejects empty authorities and credentials. */
 function parseHttpUrl(value: string, label: string): URL {
-  const shown = redactUrl(value)
   if (/^https?:\/\/[/\\]/i.test(value)) {
-    throw new Error(`Invalid ${label} "${shown}": expected an http(s) URL`)
+    throw new Error(`Invalid ${label}: expected an http(s) URL`)
   }
   let url: URL
   try {
     url = new URL(value)
   } catch {
-    throw new Error(`Invalid ${label} "${shown}": expected an http(s) URL`)
+    throw new Error(`Invalid ${label}: expected an http(s) URL`)
   }
   if ((url.protocol !== "http:" && url.protocol !== "https:") || !url.hostname) {
-    throw new Error(`Invalid ${label} "${shown}": expected an http(s) URL`)
+    throw new Error(`Invalid ${label}: expected an http(s) URL`)
   }
   if (url.username || url.password) {
-    throw new Error(`Invalid ${label} "${shown}": credentials are not allowed`)
+    throw new Error(`Invalid ${label}: credentials are not allowed`)
   }
   if (url.search || url.hash) {
-    throw new Error(`Invalid ${label} "${shown}": query and fragment are not allowed`)
+    throw new Error(`Invalid ${label}: query and fragment are not allowed`)
   }
   return url
 }
@@ -357,7 +349,7 @@ export function resolveSearchBaseUrl(options?: WebsearchOptions): string {
     const url = parseHttpUrl(override, "searchBaseUrl")
     const path = strip(url.pathname)
     if (/\/v1(\/tools(\/(search|fetch))?)?$/i.test(path)) {
-      throw new Error(`Invalid searchBaseUrl "${redactUrl(override)}": use the API root without /v1`)
+      throw new Error("Invalid searchBaseUrl: use the API root without /v1")
     }
     return `${url.origin}${path}`
   }
@@ -407,6 +399,35 @@ function pickBoolean(value: unknown): boolean | undefined {
     return false
   }
   return undefined
+}
+
+/** True when the trimmed query exceeds 128 code points, with a bounded scan. */
+function nativeQueryTooLong(value: string): boolean {
+  const scanLimit = 1024
+  let start = 0
+  while (start < value.length && start < scanLimit) {
+    const char = value[start]
+    if (char === undefined || !/\s/.test(char)) break
+    start++
+  }
+  let end = value.length
+  while (end > start && value.length - end < scanLimit) {
+    const char = value[end - 1]
+    if (char === undefined || !/\s/.test(char)) break
+    end--
+  }
+  if (start >= end) return false // empty after trim; reported separately
+  if (end - start > 256) return true
+  let count = 0
+  for (let index = start; index < end; index++) {
+    const code = value.charCodeAt(index)
+    if (code >= 0xd800 && code <= 0xdbff && index + 1 < end) {
+      const next = value.charCodeAt(index + 1)
+      if (next >= 0xdc00 && next <= 0xdfff) index++
+    }
+    if (++count > 128) return true
+  }
+  return false
 }
 
 /** True when `value` has more than `limit` Unicode code points (early exit). */
@@ -737,8 +758,11 @@ export function dedupeSources(sources: readonly DeepSeekSource[]): DeepSeekSourc
 /** Only http(s) URLs with a host and no credentials are usable sources. */
 function isHttpSourceUrl(value: string): boolean {
   if (value.length > 8192) return false
-  // Reject raw control characters and backslashes that URL parsers normalize.
-  if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029\ufeff\u200b-\u200f\\]/.test(value)) return false
+  if (/^https?:\/\/[/\\]/i.test(value)) return false
+  // Reject raw control/format characters and backslashes that URL parsers normalize.
+  if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029\\]|\p{Cf}|[\uFE00-\uFE0F]/u.test(value)) {
+    return false
+  }
   try {
     const url = new URL(value)
     return (
@@ -1051,8 +1075,8 @@ export async function searchDeepSeek(
   searchApi: SearchApi = resolveSearchApi(options),
 ): Promise<{ answer: string; sources: DeepSeekSource[] }> {
   const provider = resolveProvider(options)
-  // Reject absurd native queries before trim/scan (native limit is 128 code points).
-  if (searchApi === "native" && typeof query === "string" && query.length > 256) {
+  // Reject oversized native queries before trim, with a bounded scan.
+  if (searchApi === "native" && typeof query === "string" && nativeQueryTooLong(query)) {
     throw new Error("query must be at most 128 characters for the native search API")
   }
   const trimmedQuery = typeof query === "string" ? query.trim() : ""
@@ -1106,6 +1130,13 @@ export async function searchDeepSeek(
     const data = (await response.json()) as DeepSeekResponse
     // A cancellation may arrive after the response completed.
     if (signal?.aborted) throwCancellation(signal, undefined)
+    if (!data || !Array.isArray(data.content)) {
+      const message = (data as { error?: { message?: unknown } } | undefined)?.error?.message
+      if (typeof message === "string" && message.trim()) {
+        throw new Error(`Web search API error: ${message.trim()}`)
+      }
+      throw new Error("Web search API returned an invalid response")
+    }
     return extractAnswerAndSources(data)
   } catch (error) {
     // `fetch`/`json` reject with the raw signal reason; normalise any
