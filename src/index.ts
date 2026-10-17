@@ -446,9 +446,9 @@ function readEnv(name: string, env: NodeJS.ProcessEnv = process.env): string | u
   return value && value.trim() ? value.trim() : undefined
 }
 
-/** Safe provider label for error messages: known id shape or a neutral phrase. */
+/** Safe provider label for error messages: known presets only. */
 function providerLabel(provider: string): string {
-  return /^[a-z0-9._-]{1,64}$/i.test(provider) ? provider : "configured provider"
+  return getPreset(provider) ? provider : "configured provider"
 }
 
 /**
@@ -1207,8 +1207,11 @@ export const plugin = {
                 query: {
                   type: "string",
                   minLength: 1,
-                  maxLength: MAX_MESSAGE_QUERY_LENGTH,
-                  description: "Search query (native mode: up to 128 characters)",
+                  maxLength: searchApi === "native" ? 128 : MAX_MESSAGE_QUERY_LENGTH,
+                  description:
+                    searchApi === "native"
+                      ? "Search query (up to 128 characters)"
+                      : "Search query",
                 },
               },
               required: ["query"],
