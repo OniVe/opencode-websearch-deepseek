@@ -132,8 +132,8 @@ from `ctx.options`):
   the provider's integration (after `opencode auth login`). No key is needed when
   the provider is authenticated in OpenCode.
 - **Model:** `options.model` → `WEBSEARCH_MODEL` → OpenCode's default model when
-  it belongs to the same provider → provider preset default. Resolved once, when
-  the plugin loads.
+  it belongs to the same provider → provider preset default. Resolved once, with
+  a lazy retry if the first lookup times out.
 - **Endpoint:** `options.baseUrl` → provider preset
   (`https://api.deepseek.com/anthropic/v1/messages`,
   `https://api.anthropic.com/v1/messages`).
@@ -180,8 +180,9 @@ Messages tool:
 - `fetch: N` then calls `POST /v1/tools/fetch` for the top N results and
   replaces their content with full page Markdown. Fetch is best effort: the
   search still succeeds if a page cannot be retrieved. Search starts and fetch
-  starts are each paced process-wide by at least 200 ms (the Search and Fetch
-  quotas are independent); failures are reported once via `console.warn`.
+  starts are each paced process-wide by about 210 ms (below the 5 QPS limit;
+  the Search and Fetch quotas are independent); failures are reported once via
+  `console.warn`.
 - The native Search API does **not** synthesize an answer, so `answer` is `""`;
   the provider returns the source list and `tools.websearch.search` returns
   `{ answer: "", sources }`. The model reads the source content.
@@ -197,7 +198,8 @@ Messages tool:
 - Queries are limited to 1–128 Unicode characters by the native API; the plugin
   rejects longer queries before the request.
 - Billing: direct Search and Fetch calls cost $0.75 per 1,000 successful
-  requests each, with 5 QPS per account. (Server-side tool calls made through
+  requests each, with 5 QPS per API (Search and Fetch quotas are independent).
+  (Server-side tool calls made through
   Harness/Claude Code/Codex are free until 2026-11-01; this plugin's native mode
   calls the APIs directly.) Query operators (`site:`, `-site:`, `"..."`,
   `lang:`, `after:`, `before:`) are passed through unchanged.

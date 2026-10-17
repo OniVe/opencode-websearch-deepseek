@@ -56,8 +56,8 @@ export const DEFAULT_COUNT = 10
 /** Maximum number of results accepted by the native Search API. */
 export const MAX_COUNT = 50
 
-/** Minimum spacing between native API requests (5 QPS per account). */
-export const RATE_LIMIT_INTERVAL_MS = 200
+/** Minimum spacing between native API requests (below the 5 QPS limit). */
+export const RATE_LIMIT_INTERVAL_MS = 210
 
 /** Fallback URL used when a result has no source of its own. */
 export const FALLBACK_URL = "https://api.deepseek.com"
@@ -283,9 +283,11 @@ export function resolveProvider(options?: WebsearchOptions): string {
   return readString(options?.provider) ?? DEFAULT_PROVIDER
 }
 
-/** Hide userinfo before echoing a URL in an error message. */
+/** Hide userinfo and query/fragment before echoing a URL in an error message. */
 function redactUrl(value: string): string {
-  return value.replace(/\/\/[^/]*@/, "//<redacted>@")
+  return value
+    .replace(/[?#].*$/, "")
+    .replace(/^([a-z][a-z0-9+.-]*:)([/\\]*)[^/\\]*@/i, "$1$2<redacted>@")
 }
 
 /** Parse and validate an http(s) URL; rejects empty authorities and credentials. */
@@ -354,7 +356,7 @@ export function resolveSearchBaseUrl(options?: WebsearchOptions): string {
   if (override) {
     const url = parseHttpUrl(override, "searchBaseUrl")
     const path = strip(url.pathname)
-    if (/\/v1$/i.test(path)) {
+    if (/\/v1(\/tools(\/(search|fetch))?)?$/i.test(path)) {
       throw new Error(`Invalid searchBaseUrl "${redactUrl(override)}": use the API root without /v1`)
     }
     return `${url.origin}${path}`
@@ -407,6 +409,17 @@ function pickBoolean(value: unknown): boolean | undefined {
   return undefined
 }
 
+/** True when `value` has more than `limit` Unicode code points (early exit). */
+function exceedsCodePoints(value: string, limit: number): boolean {
+  // 128 code points cannot exceed 256 UTF-16 units; reject huge inputs in O(1).
+  if (value.length > limit * 2) return true
+  let count = 0
+  for (const _ of value) {
+    if (++count > limit) return true
+  }
+  return false
+}
+
 /** Resolve how many native results to request. Invalid input falls back to 10. */
 export function resolveCount(raw: unknown = process.env.WEBSEARCH_COUNT): number {
   return pickIntegerInRange(raw, 1, MAX_COUNT) ?? DEFAULT_COUNT
@@ -445,6 +458,7 @@ export async function resolveApiKey(
   options?: WebsearchOptions,
   signal?: AbortSignal,
 ): Promise<string | undefined> {
+  if (signal?.aborted) throwCancellation(signal, undefined)
   const fromOptions = readString(options?.apiKey)
   if (fromOptions) return fromOptions
 
@@ -599,7 +613,8 @@ function createRateLimiter(intervalMs: number) {
       })
       // Keep the chain alive after a cancellation so later callers still run.
       tail = run.catch(() => {})
-      return run
+      // A caller that is still queued can cancel without waiting for its slot.
+      return signal ? withAbort(run, signal) : run
     },
   }
 }
@@ -722,6 +737,8 @@ export function dedupeSources(sources: readonly DeepSeekSource[]): DeepSeekSourc
 /** Only http(s) URLs with a host and no credentials are usable sources. */
 function isHttpSourceUrl(value: string): boolean {
   if (value.length > 8192) return false
+  // Reject raw control characters and backslashes that URL parsers normalize.
+  if (/[\u0000-\u001f\u007f\u2028\u2029\\]/.test(value)) return false
   try {
     const url = new URL(value)
     return (
@@ -807,7 +824,8 @@ export function extractAnswerAndSources(data: DeepSeekResponse): {
  */
 export function toResults(answer: string, sources: readonly DeepSeekSource[] = []): WebSearchResult[] {
   const valid = (Array.isArray(sources) ? sources : []).filter(
-    (source): source is DeepSeekSource => typeof source?.url === "string" && source.url.length > 0,
+    (source): source is DeepSeekSource =>
+      typeof source?.url === "string" && isHttpSourceUrl(source.url),
   )
   const results: WebSearchResult[] = []
   if (answer) {
@@ -842,7 +860,8 @@ export function toResults(answer: string, sources: readonly DeepSeekSource[] = [
 /** Textual form of a search result, for the non-Code-Mode (native) context. */
 export function toContent(answer: string, sources: readonly DeepSeekSource[]): string {
   const valid = (Array.isArray(sources) ? sources : []).filter(
-    (source): source is DeepSeekSource => typeof source?.url === "string" && source.url.length > 0,
+    (source): source is DeepSeekSource =>
+      typeof source?.url === "string" && isHttpSourceUrl(source.url),
   )
   if (valid.length === 0) return answer
   const lines = valid.map((source) => `- ${source.title || source.url} — ${source.url}`)
@@ -855,7 +874,10 @@ export function toSourceObjects(
   sources: readonly DeepSeekSource[],
 ): Array<{ url: string; title: string; content: string }> {
   return (Array.isArray(sources) ? sources : [])
-    .filter((source): source is DeepSeekSource => typeof source?.url === "string" && source.url.length > 0)
+    .filter(
+      (source): source is DeepSeekSource =>
+        typeof source?.url === "string" && isHttpSourceUrl(source.url),
+    )
     .map((source) => ({ url: source.url, title: source.title || source.url, content: source.content ?? "" }))
 }
 
@@ -981,7 +1003,7 @@ async function nativeSearch(
   signal?: AbortSignal,
 ): Promise<{ answer: string; sources: DeepSeekSource[] }> {
   // The native Search API accepts 1-128 Unicode characters.
-  if ([...query].length > 128) {
+  if (exceedsCodePoints(query, 128)) {
     throw new Error("query must be at most 128 characters for the native search API")
   }
   const { apiKey } = await requireApiKey(ctx, options, signal)

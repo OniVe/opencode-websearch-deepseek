@@ -1,4 +1,4 @@
-import { after, before, test } from "node:test"
+import { after, before, beforeEach, test } from "node:test"
 import assert from "node:assert/strict"
 
 import plugin, {
@@ -28,6 +28,7 @@ import plugin, {
   resolveThinking,
   toContent,
   toResults,
+  toSourceObjects,
 } from "../dist/index.js"
 
 const ENV_KEYS = [
@@ -52,6 +53,10 @@ before(() => {
     savedEnv[key] = process.env[key]
     delete process.env[key]
   }
+})
+
+beforeEach(() => {
+  for (const key of ENV_KEYS) delete process.env[key]
 })
 
 after(() => {
@@ -1022,13 +1027,17 @@ test("resolveSearchBaseUrl prefers the override and derives from baseUrl", () =>
   assert.throws(() => resolveSearchBaseUrl({ searchBaseUrl: "ftp://x" }), /Invalid searchBaseUrl/)
   assert.throws(() => resolveSearchBaseUrl({ searchBaseUrl: "https://" }), /Invalid searchBaseUrl/)
   assert.throws(() => resolveSearchBaseUrl({ searchBaseUrl: "https:///v1" }), /Invalid searchBaseUrl/)
-  assert.throws(
-    () => resolveSearchBaseUrl({ searchBaseUrl: "https://user:topsecret@host/x" }),
-    (error) =>
-      error instanceof Error &&
-      /credentials are not allowed/.test(error.message) &&
-      !error.message.includes("topsecret"),
-  )
+  for (const value of [
+    "https://user:topsecret@host/x",
+    "https:/user:topsecret@host/x",
+    "https:\\user:topsecret@host",
+    "https:user:topsecret@host/x",
+  ]) {
+    assert.throws(
+      () => resolveSearchBaseUrl({ searchBaseUrl: value }),
+      (error) => error instanceof Error && !error.message.includes("topsecret"),
+    )
+  }
   assert.throws(
     () => resolveSearchBaseUrl({ searchBaseUrl: "https://user:pa@ss@host/x" }),
     (error) =>
@@ -1039,6 +1048,14 @@ test("resolveSearchBaseUrl prefers the override and derives from baseUrl", () =>
   assert.throws(
     () => resolveSearchBaseUrl({ searchBaseUrl: "https://x.example/v1" }),
     /without \/v1/,
+  )
+  assert.throws(
+    () => resolveSearchBaseUrl({ searchBaseUrl: "https://x.example/v1/tools" }),
+    /without \/v1/,
+  )
+  assert.throws(
+    () => resolveSearchBaseUrl({ searchBaseUrl: "https://gw.example/v1/messages?api_key=SECRET123" }),
+    (error) => error instanceof Error && !error.message.includes("SECRET123"),
   )
   assert.throws(() => resolveSearchBaseUrl({ baseUrl: "ftp://x" }), /Invalid baseUrl/)
   assert.throws(() => resolveSearchBaseUrl({ baseUrl: "https://" }), /Invalid baseUrl/)
@@ -1397,7 +1414,7 @@ test("fetch enrichment spaces request starts to respect 5 QPS", async () => {
   await provider.execute({ query: "hi" }, {})
   const fetches = started.filter((call) => call.url === FETCH_URL)
   assert.equal(fetches.length, 2)
-  assert.ok(fetches[1].at - fetches[0].at >= 195, "fetch starts must be ~200ms apart")
+  assert.ok(fetches[1].at - fetches[0].at >= 205, "fetch starts must be ~200ms apart")
 })
 
 test("request pacing is shared by concurrent calls", async () => {
@@ -1428,12 +1445,12 @@ test("request pacing is shared by concurrent calls", async () => {
   assert.equal(fetchStarts.length, 3)
   for (let index = 1; index < searchStarts.length; index++) {
     assert.ok(
-      searchStarts[index] - searchStarts[index - 1] >= 195,
+      searchStarts[index] - searchStarts[index - 1] >= 205,
       "concurrent searches must be paced",
     )
   }
   for (let index = 1; index < fetchStarts.length; index++) {
-    assert.ok(fetchStarts[index] - fetchStarts[index - 1] >= 195, "concurrent fetches must be paced")
+    assert.ok(fetchStarts[index] - fetchStarts[index - 1] >= 205, "concurrent fetches must be paced")
   }
 })
 
@@ -1622,6 +1639,7 @@ test("messages sources drop non-http URLs", () => {
 
 test("pre-abort wins before the credential lookup", async () => {
   let activeCalls = 0
+  let resolveCalls = 0
   let captured
   const controller = new AbortController()
   controller.abort(new Error("pre-credential"))
@@ -1635,6 +1653,7 @@ test("pre-abort wins before the credential lookup", async () => {
           return {}
         },
         async resolve() {
+          resolveCalls++
           return { key: "k" }
         },
       },
@@ -1647,4 +1666,66 @@ test("pre-abort wins before the credential lookup", async () => {
     /pre-credential/,
   )
   assert.equal(activeCalls, 0)
+  assert.equal(resolveCalls, 0)
+})
+
+test("aborting a queued caller rejects without waiting for its slot", async () => {
+  const provider = await registerWith({ searchApi: "native", apiKey: "k", count: 1 })
+  const controller = new AbortController()
+  let searches = 0
+  globalThis.fetch = async (url) => {
+    if (url === SEARCH_URL) {
+      searches++
+      return { ok: true, status: 200, text: async () => "", json: async () => ({ results: [] }) }
+    }
+    return { ok: true, status: 200, text: async () => "", json: async () => ({ title: "T", content: "C" }) }
+  }
+
+  const first = provider.execute({ query: "first" }, {})
+  const queued = provider.execute({ query: "queued" }, { signal: controller.signal })
+  let abortAt = 0
+  setTimeout(() => {
+    abortAt = Date.now()
+    controller.abort(new Error("queued-abort"))
+  }, 30)
+
+  await assert.rejects(() => queued, /queued-abort/)
+  assert.ok(Date.now() - abortAt < 100, "queued abort must not wait for its slot")
+  await first
+  await new Promise((resolve) => setTimeout(resolve, 260))
+  assert.equal(searches, 1)
+})
+
+test("native search rejects a huge query without scanning it", async () => {
+  const provider = await registerWith({ searchApi: "native", apiKey: "k" })
+  let calls = 0
+  globalThis.fetch = async () => {
+    calls++
+    throw new Error("must not be called")
+  }
+  const started = Date.now()
+  await assert.rejects(() => provider.execute({ query: "a".repeat(1_000_000) }, {}), /at most 128/)
+  assert.ok(Date.now() - started < 100)
+  assert.equal(calls, 0)
+})
+
+test("exporters drop non-http source URLs", () => {
+  const sources = [{ url: "javascript:alert(1)" }, { url: "https://ok.example/x", title: "OK" }]
+  assert.deepEqual(toResults("", sources).map((result) => result.url), ["https://ok.example/x"])
+  assert.doesNotMatch(toContent("", sources), /javascript/)
+  assert.deepEqual(toSourceObjects(sources), [
+    { url: "https://ok.example/x", title: "OK", content: "" },
+  ])
+})
+
+test("URL validation rejects control characters and backslashes", () => {
+  assert.deepEqual(
+    mapNativeResults([
+      { url: "https://ok.example/a\njavascript:alert(1)", title: "x" },
+      { url: "https://ok.example/a\u2028b", title: "y" },
+      { url: "https:\\ok.example\\a", title: "z" },
+      { url: "https://ok.example/ok", title: "OK" },
+    ]),
+    [{ url: "https://ok.example/ok", title: "OK", content: "" }],
+  )
 })
