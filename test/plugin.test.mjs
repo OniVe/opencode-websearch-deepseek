@@ -1356,8 +1356,10 @@ test("native search trims padding without rejecting a short query", async () => 
     body = JSON.parse(init.body)
     return { ok: true, status: 200, text: async () => "", json: async () => ({ results: [] }) }
   }
-  await provider.execute({ query: " ".repeat(300) + "hello" }, {})
-  assert.equal(body.query, "hello")
+  for (const padding of [300, 1148, 1200]) {
+    await provider.execute({ query: " ".repeat(padding) + "hello" }, {})
+    assert.equal(body.query, "hello")
+  }
 })
 
 test("aborting during fetch enrichment stops the remaining fetches", async () => {
@@ -1743,7 +1745,7 @@ test("native search rejects a huge query without scanning it", async () => {
   const whitespace = " ".repeat(10_000_000)
   const started = Date.now()
   await assert.rejects(() => provider.execute({ query: huge }, {}), /at most 128/)
-  await assert.rejects(() => provider.execute({ query: whitespace }, {}), /at most 128/)
+  await assert.rejects(() => provider.execute({ query: whitespace }, {}), /non-empty/)
   assert.ok(Date.now() - started < 20)
   assert.equal(calls, 0)
 })
@@ -1767,6 +1769,8 @@ test("URL validation rejects control characters and backslashes", () => {
       { url: "https://ok.example/a\u200bb", title: "zw" },
       { url: "https://ok.example/a\u2060b", title: "wj" },
       { url: "https://ok.example/a\u00adb", title: "shy" },
+      { url: "https://ok.example/a\uFE0Fb", title: "vs16" },
+      { url: "https://ok.example/a\u{E0100}b", title: "vs-supp" },
       { url: "https:///x", title: "empty-authority" },
       { url: "https://ok.example/ok", title: "OK" },
     ]),
@@ -1882,4 +1886,76 @@ test("tool pre-abort skips the lazy model lookup", async () => {
   )
   assert.ok(Date.now() - started < 50)
   assert.equal(modelCalls, afterSetup)
+})
+
+test("messages rejects a query above the backend cap", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  let calls = 0
+  globalThis.fetch = async () => {
+    calls++
+    return { ok: true, status: 200, text: async () => "", json: async () => ({ content: [] }) }
+  }
+  await assert.rejects(() => provider.execute({ query: "a".repeat(8193) }, {}), /at most 8192/)
+  assert.equal(calls, 0)
+
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => "",
+    json: async () => ({ content: [] }),
+  })
+  await provider.execute({ query: "a".repeat(8192) }, {})
+})
+
+test("messages does not return results aborted during response parsing", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  const controller = new AbortController()
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => "",
+    json: async () => {
+      controller.abort(new Error("abort-after-body"))
+      return { content: [{ type: "text", text: "answer" }] }
+    },
+  })
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, { signal: controller.signal }),
+    /abort-after-body/,
+  )
+})
+
+test("aborting during the lazy model lookup rejects promptly", async () => {
+  let captured
+  await plugin.setup({
+    options: { provider: "anthropic", apiKey: "k" },
+    model: {
+      async default() {
+        await new Promise((resolve) => setTimeout(resolve, 600))
+        return { providerID: "other", modelID: "x" }
+      },
+    },
+    websearch: { async transform(callback) { callback({ add(provider) { captured = provider }, default: { set() {} } }) } },
+  })
+  const controller = new AbortController()
+  const started = Date.now()
+  const call = captured.execute({ query: "hi" }, { signal: controller.signal })
+  setTimeout(() => controller.abort(new Error("mid-model")), 10)
+  await assert.rejects(() => call, /mid-model/)
+  assert.ok(Date.now() - started < 150)
+})
+
+test("native options fall back to environment variables", async () => {
+  process.env.WEBSEARCH_COUNT = "7"
+  process.env.WEBSEARCH_NEED_CONTENT = "true"
+  const provider = await registerWith({ searchApi: "native", apiKey: "k" })
+  let body
+  globalThis.fetch = async (_url, init) => {
+    body = JSON.parse(init.body)
+    return { ok: true, status: 200, text: async () => "", json: async () => ({ results: [] }) }
+  }
+  await provider.execute({ query: "hi" }, {})
+  assert.deepEqual(body, { query: "hi", count: 7, need_content: true })
 })

@@ -132,8 +132,8 @@ from `ctx.options`):
   the provider's integration (after `opencode auth login`). No key is needed when
   the provider is authenticated in OpenCode.
 - **Model:** `options.model` → `WEBSEARCH_MODEL` → OpenCode's default model when
-  it belongs to the same provider → provider preset default. Resolved once, with
-  a lazy retry if the first lookup times out.
+  it belongs to the same provider → provider preset default. Resolved once; for
+  providers without a preset default, a timed-out lookup is retried lazily.
 - **Endpoint:** `options.baseUrl` → provider preset
   (`https://api.deepseek.com/anthropic/v1/messages`,
   `https://api.anthropic.com/v1/messages`).
@@ -187,8 +187,8 @@ Messages tool:
   the provider returns the source list and `tools.websearch.search` returns
   `{ answer: "", sources }`. The model reads the source content.
 - Only `url`, `title`, and `content` are exposed to the model; `site_name`,
-  `date`, `authority`, and `rerank_score` are present in the API response but
-  are not exposed.
+  `site_icon`, `date`, `authority`, and `rerank_score` are present in the API
+  response but are not exposed.
 - The base URL defaults to `https://api.deepseek.com` and can be overridden with
   `searchBaseUrl` (an origin or path prefix without `/v1`; the `/v1/tools/*`
   suffix is appended, and a `/v1` suffix is rejected). It is also derived from
@@ -198,7 +198,8 @@ Messages tool:
 - `searchApi` is fixed when the plugin loads; `searchBaseUrl`, `count`,
   `needContent`, and `fetch` are read on each call.
 - Queries are limited to 1–128 Unicode characters by the native API; the plugin
-  rejects longer queries before the request.
+  rejects longer queries before the request. The messages backend caps queries
+  at 8192 characters.
 - Billing: direct Search and Fetch calls cost $0.75 per 1,000 successful
   requests each, with 5 QPS per API (Search and Fetch quotas are independent).
   (Server-side tool calls made through

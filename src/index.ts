@@ -56,6 +56,9 @@ export const DEFAULT_COUNT = 10
 /** Maximum number of results accepted by the native Search API. */
 export const MAX_COUNT = 50
 
+/** Maximum query length accepted by the messages backend. */
+export const MAX_MESSAGE_QUERY_LENGTH = 8192
+
 /** Minimum spacing between native API requests (below the 5 QPS limit). */
 export const RATE_LIMIT_INTERVAL_MS = 210
 
@@ -316,7 +319,7 @@ export function resolveEndpoint(options?: WebsearchOptions): string {
   const provider = resolveProvider(options)
   const preset = getPreset(provider)
   if (preset) return preset.endpoint
-  throw new Error(`Unknown provider "${provider}": set the baseUrl plugin option to its /v1/messages URL`)
+  throw new Error("Unknown provider: set the baseUrl plugin option to its /v1/messages URL")
 }
 
 /**
@@ -332,7 +335,7 @@ export function resolveSearchApi(options?: WebsearchOptions): SearchApi {
   if (!raw) return "messages"
   const normalized = raw.toLowerCase()
   if (normalized === "messages" || normalized === "native") return normalized
-  throw new Error(`Invalid searchApi "${raw}": expected "messages" or "native"`)
+  throw new Error('Invalid searchApi: expected "messages" or "native"')
 }
 
 /**
@@ -401,33 +404,14 @@ function pickBoolean(value: unknown): boolean | undefined {
   return undefined
 }
 
-/** True when the trimmed query exceeds 128 code points, with a bounded scan. */
+/** True when the trimmed query exceeds 128 code points (fast for huge input). */
 function nativeQueryTooLong(value: string): boolean {
-  const scanLimit = 1024
-  let start = 0
-  while (start < value.length && start < scanLimit) {
-    const char = value[start]
-    if (char === undefined || !/\s/.test(char)) break
-    start++
-  }
-  let end = value.length
-  while (end > start && value.length - end < scanLimit) {
-    const char = value[end - 1]
-    if (char === undefined || !/\s/.test(char)) break
-    end--
-  }
-  if (start >= end) return false // empty after trim; reported separately
-  if (end - start > 256) return true
-  let count = 0
-  for (let index = start; index < end; index++) {
-    const code = value.charCodeAt(index)
-    if (code >= 0xd800 && code <= 0xdbff && index + 1 < end) {
-      const next = value.charCodeAt(index + 1)
-      if (next >= 0xdc00 && next <= 0xdfff) index++
-    }
-    if (++count > 128) return true
-  }
-  return false
+  if (value.length <= 256) return false
+  const edge = 256
+  // Fast path: non-whitespace at both edges means the trimmed text is huge.
+  if (/\S/.test(value.slice(0, edge)) && /\S/.test(value.slice(-edge))) return true
+  // Padding at an edge: a real trim is required for correctness.
+  return exceedsCodePoints(value.trim(), 128)
 }
 
 /** True when `value` has more than `limit` Unicode code points (early exit). */
@@ -760,7 +744,11 @@ function isHttpSourceUrl(value: string): boolean {
   if (value.length > 8192) return false
   if (/^https?:\/\/[/\\]/i.test(value)) return false
   // Reject raw control/format characters and backslashes that URL parsers normalize.
-  if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029\\]|\p{Cf}|[\uFE00-\uFE0F]/u.test(value)) {
+  if (
+    /[\u0000-\u001f\u007f-\u009f\u2028\u2029\\\u034F]|\p{Cf}|[\u180B-\u180D\u180F\uFE00-\uFE0F\u{E0100}-\u{E01EF}]/u.test(
+      value,
+    )
+  ) {
     return false
   }
   try {
@@ -1048,7 +1036,7 @@ async function nativeSearch(
   if (!data || !Array.isArray(data.results)) {
     const message = (data as { error?: { message?: unknown } } | undefined)?.error?.message
     if (typeof message === "string" && message.trim()) {
-      throw new Error(`Web search API error: ${message.trim()}`)
+      throw new Error(`Web search API error: ${message.trim().slice(0, 300)}`)
     }
     throw new Error("Web search API returned no results array")
   }
@@ -1078,6 +1066,9 @@ export async function searchDeepSeek(
   // Reject oversized native queries before trim, with a bounded scan.
   if (searchApi === "native" && typeof query === "string" && nativeQueryTooLong(query)) {
     throw new Error("query must be at most 128 characters for the native search API")
+  }
+  if (searchApi !== "native" && typeof query === "string" && query.length > MAX_MESSAGE_QUERY_LENGTH) {
+    throw new Error(`query must be at most ${MAX_MESSAGE_QUERY_LENGTH} characters`)
   }
   const trimmedQuery = typeof query === "string" ? query.trim() : ""
   try {
@@ -1133,7 +1124,7 @@ export async function searchDeepSeek(
     if (!data || !Array.isArray(data.content)) {
       const message = (data as { error?: { message?: unknown } } | undefined)?.error?.message
       if (typeof message === "string" && message.trim()) {
-        throw new Error(`Web search API error: ${message.trim()}`)
+        throw new Error(`Web search API error: ${message.trim().slice(0, 300)}`)
       }
       throw new Error("Web search API returned an invalid response")
     }
@@ -1166,10 +1157,13 @@ export const plugin = {
       searchApi === "native"
         ? undefined
         : ((await raceTimeout(resolveModel(ctx, options), 2000)) ?? getPreset(provider)?.defaultModel)
-    const getModel = async (): Promise<string | undefined> => {
+    const getModel = async (signal?: AbortSignal): Promise<string | undefined> => {
       if (searchApi === "native") return undefined
       if (cachedModel) return cachedModel
-      cachedModel = (await raceTimeout(resolveModel(ctx, options), 2000)) ?? getPreset(provider)?.defaultModel
+      if (signal?.aborted) throwCancellation(signal, undefined)
+      const resolved = await withAbort(raceTimeout(resolveModel(ctx, options), 2000), signal)
+      if (signal?.aborted) throwCancellation(signal, undefined)
+      cachedModel = resolved ?? getPreset(provider)?.defaultModel
       return cachedModel
     }
 
@@ -1179,7 +1173,7 @@ export const plugin = {
         name: providerDisplay(provider),
         execute: async ({ query }, context) => {
           if (context?.signal?.aborted) throwCancellation(context.signal, undefined)
-          const model = await getModel()
+          const model = await getModel(context?.signal)
           const { answer, sources } = await searchDeepSeek(
             ctx,
             options,
@@ -1205,7 +1199,14 @@ export const plugin = {
             description: "Search the web and return relevant results with source URLs.",
             input: {
               type: "object",
-              properties: { query: { type: "string", minLength: 1, description: "Search query" } },
+              properties: {
+                query: {
+                  type: "string",
+                  minLength: 1,
+                  maxLength: MAX_MESSAGE_QUERY_LENGTH,
+                  description: "Search query",
+                },
+              },
               required: ["query"],
               additionalProperties: false,
             },
@@ -1232,7 +1233,7 @@ export const plugin = {
             execute: async (input: { query?: unknown }, context: { signal?: AbortSignal }) => {
               const query = typeof input?.query === "string" ? input.query : ""
               if (context?.signal?.aborted) throwCancellation(context.signal, undefined)
-              const model = await getModel()
+              const model = await getModel(context?.signal)
               const { answer, sources } = await searchDeepSeek(
                 ctx,
                 options,
