@@ -208,7 +208,8 @@ Messages tool:
   `lang:`, `after:`, `before:`) are passed through unchanged.
 - There is no client-side timeout: a slow page can delay a `fetch` call until
   the API's own timeout. Prefer `https` for the base URL; an `http` endpoint
-  sends the API key in clear text.
+  sends the API key in clear text. Responses are capped at 8 MiB (success) and
+  64 KiB (error bodies); requests reject redirects.
 
 ## Code Mode (execute)
 

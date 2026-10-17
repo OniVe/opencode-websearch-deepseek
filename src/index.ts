@@ -62,7 +62,7 @@ export const MAX_MESSAGE_QUERY_LENGTH = 8192
 /** Raw UTF-16 length rejected immediately for the messages backend. */
 export const MAX_RAW_MESSAGE_QUERY_LENGTH = 1_000_000
 
-/** Minimum spacing between native API requests (below the 5 QPS limit). */
+/** Per-API spacing between native requests (Search/Fetch quotas are independent). */
 export const RATE_LIMIT_INTERVAL_MS = 210
 
 /** Fallback URL used when a result has no source of its own. */
@@ -946,14 +946,23 @@ function extractErrorMessage(text: string): string {
 /** Normalize a remote error code/message for an error string. */
 function remoteMessage(value: unknown, fallback: string): string {
   const text = typeof value === "string" && value.trim() ? value.trim() : fallback
-  const sanitized = text.replace(
-    /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c]/g,
-    " ",
-  )
-  return Array.from(sanitized)
+  const head = text.slice(0, 4096)
+  const sanitized = head
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ")
+    .replace(/\p{Cf}/gu, (char) => {
+      const code = char.codePointAt(0) ?? 0
+      // Preserve ZWJ and tag sequences used by emoji; strip other format chars.
+      return code === 0x200d || code === 0xe0001 || (code >= 0xe0020 && code <= 0xe007f)
+        ? char
+        : " "
+    })
+    .replace(/[ \t]+/g, " ")
+    .trim()
+  const result = Array.from(sanitized)
     .slice(0, 300)
     .join("")
     .replace(/[\uD800-\uDFFF]/gu, "\uFFFD")
+  return result || fallback
 }
 
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -974,11 +983,14 @@ async function readStreamLimited(
       const { done, value } = await withAbort(reader.read(), signal)
       if (done) break
       if (!value) continue
-      bytes += value.byteLength
-      if (bytes > maxBytes) {
-        await reader.cancel().catch(() => {})
+      const remaining = maxBytes - bytes
+      if (remaining <= 0) break
+      if (value.byteLength >= remaining) {
+        text += decoder.decode(value.subarray(0, remaining), { stream: true })
+        void reader.cancel().catch(() => {})
         break
       }
+      bytes += value.byteLength
       text += decoder.decode(value, { stream: true })
     }
     return text + decoder.decode()
@@ -1029,6 +1041,7 @@ async function postNativeTool(
   const response = await withAbort(
     fetch(url, {
       method: "POST",
+      redirect: "error",
       signal,
       headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
       body: JSON.stringify(body),
@@ -1201,6 +1214,7 @@ export async function searchDeepSeek(
     const response = await withAbort(
       fetch(endpoint, {
         method: "POST",
+        redirect: "error",
         signal,
         headers: {
           "content-type": "application/json",
@@ -1260,21 +1274,25 @@ export const plugin = {
       resolveSearchBaseUrl(options)
     }
 
-    // Resolve the model once, but re-try lazily if the first attempt timed out
-    // (e.g. a slow model API on start-up for a non-preset provider). The native
-    // Search API needs no model, so skip the lookup entirely.
-    let cachedModel: string | undefined =
-      searchApi === "native"
-        ? undefined
-        : ((await raceTimeout(resolveModel(ctx, options), 2000)) ?? getPreset(provider)?.defaultModel)
+    // Resolve the model once; a timed-out lookup keeps the preset fallback but
+    // is retried lazily on the next call. The native Search API needs no model.
+    const initialModel =
+      searchApi === "native" ? undefined : await raceTimeout(resolveModel(ctx, options), 2000)
+    let cachedModel: string | undefined = initialModel ?? getPreset(provider)?.defaultModel
+    let modelResolved = initialModel !== undefined
     const getModel = async (signal?: AbortSignal): Promise<string | undefined> => {
       if (searchApi === "native") return undefined
-      if (cachedModel) return cachedModel
+      if (modelResolved && cachedModel) return cachedModel
       if (signal?.aborted) throwCancellation(signal, undefined)
       try {
         const resolved = await raceTimeout(resolveModel(ctx, options), 2000, signal)
         if (signal?.aborted) throwCancellation(signal, undefined)
-        cachedModel = resolved ?? getPreset(provider)?.defaultModel
+        if (resolved !== undefined) {
+          cachedModel = resolved
+          modelResolved = true
+        } else if (!cachedModel) {
+          cachedModel = getPreset(provider)?.defaultModel
+        }
         return cachedModel
       } catch (error) {
         if (signal?.aborted) throwCancellation(signal, error)

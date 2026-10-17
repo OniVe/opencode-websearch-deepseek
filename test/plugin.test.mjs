@@ -269,6 +269,7 @@ test("execute sends the API key, version header, and improvements", async () => 
   const results = await provider.execute({ query: "hi" }, {})
 
   assert.equal(seen.url, API_URL)
+  assert.equal(seen.init.redirect, "error")
   assert.equal(calls, 1)
   assert.equal(seen.init.headers["anthropic-version"], ANTHROPIC_VERSION)
   assert.equal(seen.init.headers["x-api-key"], "test-key")
@@ -1158,6 +1159,7 @@ test("native search sends Bearer auth and the native request body", async () => 
   const results = await provider.execute({ query: "  hi  " }, {})
 
   assert.equal(seen.url, SEARCH_URL)
+  assert.equal(seen.init.redirect, "error")
   assert.equal(calls, 1)
   assert.equal(seen.init.headers.authorization, "Bearer native-key")
   assert.equal(seen.init.headers["x-api-key"], undefined)
@@ -2166,7 +2168,7 @@ test("non-2xx bodies are sanitized", async () => {
   globalThis.fetch = async () => ({
     ok: false,
     status: 500,
-    text: async () => "denied\u0000\u001b[31mred\u0007\u202e\u2028text",
+    text: async () => "denied\u0000\u001b[31mred\u0007\u202e\u2028\u200b\u2060text",
     json: async () => ({}),
   })
   await assert.rejects(
@@ -2195,14 +2197,14 @@ test("native non-2xx bodies are sanitized", async () => {
   globalThis.fetch = async () => ({
     ok: false,
     status: 500,
-    text: async () => "denied\u0000\u001b[31mred\u0007\u202e\u2028text",
+    text: async () => "denied\u0000\u001b[31mred\u0007\u202e\u2028\u200b\u2060text",
     json: async () => ({}),
   })
   await assert.rejects(
     () => provider.execute({ query: "hi" }, {}),
     (error) =>
       error instanceof Error &&
-      !/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e]/.test(error.message),
+      !/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u200b\u2060]/.test(error.message),
   )
 })
 
@@ -2213,11 +2215,11 @@ test("200 error messages are sanitized on both backends", async () => {
     ok: true,
     status: 200,
     text: async () => "",
-    json: async () => ({ error: { message: "bad\u001b[31mred\u202e" } }),
+    json: async () => ({ error: { message: "bad\u001b[31mred\u202e\u200b\u2060" } }),
   })
   await assert.rejects(
     () => messages.execute({ query: "hi" }, {}),
-    (error) => error instanceof Error && !/[\u001b\u202e]/.test(error.message),
+    (error) => error instanceof Error && !/[\u001b\u202e\u200b\u2060]/.test(error.message),
   )
 
   const native = await registerWith({ searchApi: "native", apiKey: "k" })
@@ -2225,11 +2227,11 @@ test("200 error messages are sanitized on both backends", async () => {
     ok: true,
     status: 200,
     text: async () => "",
-    json: async () => ({ error: { message: "bad\u001b[31mred\u202e" } }),
+    json: async () => ({ error: { message: "bad\u001b[31mred\u202e\u200b\u2060" } }),
   })
   await assert.rejects(
     () => native.execute({ query: "hi" }, {}),
-    (error) => error instanceof Error && !/[\u001b\u202e]/.test(error.message),
+    (error) => error instanceof Error && !/[\u001b\u202e\u200b\u2060]/.test(error.message),
   )
 })
 
@@ -2261,7 +2263,8 @@ test("tool error codes are truncated by code points and well-formed", async () =
 })
 
 test("abort wins when the transport ignores the signal", async () => {
-  const provider = await registerWith({ searchApi: "native", apiKey: "k" })
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
   const controller = new AbortController()
   globalThis.fetch = () => new Promise(() => {})
   const started = Date.now()
@@ -2269,4 +2272,144 @@ test("abort wins when the transport ignores the signal", async () => {
   setTimeout(() => controller.abort(new Error("transport-abort")), 10)
   await assert.rejects(() => call, /transport-abort/)
   assert.ok(Date.now() - started < 200)
+})
+
+test("large error bodies are streamed and capped", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  globalThis.fetch = async () => new Response("E".repeat(100_000), { status: 500 })
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, {}),
+    (error) =>
+      error instanceof Error && error.message.length <= 330 && /E{10}/.test(error.message),
+  )
+})
+
+test("success bodies with a stream are parsed", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  globalThis.fetch = async () => new Response(JSON.stringify({ content: [] }), { status: 200 })
+  const results = await provider.execute({ query: "hi" }, {})
+  assert.equal(results[0].content, "The search returned no results.")
+})
+
+test("abort during a response stream rejects", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  const controller = new AbortController()
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode("{"))
+    },
+    pull() {
+      return new Promise(() => {})
+    },
+  })
+  globalThis.fetch = async () => new Response(stream, { status: 200 })
+  const call = provider.execute({ query: "hi" }, { signal: controller.signal })
+  setTimeout(() => controller.abort(new Error("stream-abort")), 10)
+  await assert.rejects(() => call, /stream-abort/)
+})
+
+test("error messages are extracted from large JSON bodies", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  const body = JSON.stringify({ pad: "x".repeat(10_000), error: { message: "TARGET" } })
+  globalThis.fetch = async () => new Response(body, { status: 500 })
+  await assert.rejects(() => provider.execute({ query: "hi" }, {}), /TARGET/)
+})
+
+test("tool error codes are exactly 300 code points", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => "",
+    json: async () => ({
+      content: [
+        {
+          type: "web_search_tool_result",
+          content: { type: "web_search_tool_result_error", error_code: "𝕏".repeat(500) },
+        },
+      ],
+    }),
+  })
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, {}),
+    (error) => {
+      if (!(error instanceof Error)) return false
+      const code = error.message.replace("Web search error: ", "")
+      return Array.from(code).length === 300 && error.message.isWellFormed()
+    },
+  )
+})
+
+test("tool registration failure is logged and setup still succeeds", async () => {
+  let captured
+  const warnings = []
+  const original = console.warn
+  console.warn = (...args) => warnings.push(args.join(" "))
+  try {
+    await plugin.setup({
+      websearch: { async transform(callback) { callback({ add(provider) { captured = provider }, default: { set() {} } }) } },
+      tool: { async transform() { throw new Error("tool-domain-boom") } },
+    })
+  } finally {
+    console.warn = original
+  }
+  assert.ok(captured)
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0], /tool-domain-boom/)
+})
+
+test("a timed-out model lookup is retried lazily", async () => {
+  let calls = 0
+  let captured
+  await plugin.setup({
+    options: { provider: "deepseek", apiKey: "k" },
+    model: {
+      async default() {
+        calls++
+        if (calls === 1) return new Promise(() => {})
+        return { providerID: "deepseek", modelID: "recovered" }
+      },
+    },
+    websearch: { async transform(callback) { callback({ add(provider) { captured = provider }, default: { set() {} } }) } },
+  })
+  let body
+  globalThis.fetch = async (_url, init) => {
+    body = JSON.parse(init.body)
+    return { ok: true, status: 200, text: async () => "", json: async () => ({ content: [] }) }
+  }
+  await captured.execute({ query: "hi" }, {})
+  assert.equal(body.model, "recovered")
+})
+
+test("native abort wins when the transport ignores the signal", async () => {
+  const provider = await registerWith({ searchApi: "native", apiKey: "k" })
+  await new Promise((resolve) => setTimeout(resolve, 250))
+  const controller = new AbortController()
+  globalThis.fetch = () => new Promise(() => {})
+  const started = Date.now()
+  const call = provider.execute({ query: "hi" }, { signal: controller.signal })
+  setTimeout(() => controller.abort(new Error("native-transport-abort")), 10)
+  await assert.rejects(() => call, /native-transport-abort/)
+  assert.ok(Date.now() - started < 300)
+})
+
+test("a single oversized chunk keeps its prefix", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode("PREFIX-" + "E".repeat(100_000)))
+      controller.close()
+    },
+  })
+  globalThis.fetch = async () => new Response(stream, { status: 500 })
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, {}),
+    (error) => error instanceof Error && /PREFIX-/.test(error.message),
+  )
 })
