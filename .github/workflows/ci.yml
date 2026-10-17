@@ -32,5 +32,5 @@ jobs:
           bun-version: 1.4.2
       - run: bun install --frozen-lockfile --ignore-scripts
       - run: bun run build
-      - name: Import the built plugin on Node 22
-        run: node -e "import('./dist/index.js').then((m) => { if (typeof m.plugin?.setup !== 'function') process.exit(1) })"
+      - name: Runtime smoke on Node 22
+        run: node test/node-smoke.mjs

@@ -263,6 +263,7 @@ bun install
 bun run typecheck   # tsc --noEmit
 bun run build       # emits dist/
 bun run test        # builds, then runs bun test
+bun run test:node   # Node runtime smoke (after build)
 bun run lint        # biome check
 bun run format      # biome format --write
 ```
