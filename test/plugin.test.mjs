@@ -2425,3 +2425,74 @@ test("error sanitizer preserves ZWJ/tag emoji but strips other format chars", as
     },
   )
 })
+
+test("invisible-only tool errors fall back to a code", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => "",
+    json: async () => ({
+      content: [
+        {
+          type: "web_search_tool_result",
+          content: {
+            type: "web_search_tool_result_error",
+            error_code: "\u200D\u{E0061}\uFE0F",
+          },
+        },
+      ],
+    }),
+  })
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, {}),
+    (error) => error instanceof Error && /web_search_tool_result_error/.test(error.message),
+  )
+})
+
+test("messages keeps an answer when a tool error is non-fatal", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => "",
+    json: async () => ({
+      content: [
+        { type: "text", text: "ANSWER" },
+        {
+          type: "web_search_tool_result",
+          content: { type: "web_search_tool_result_error", error_code: "max_uses_exceeded" },
+        },
+        {
+          type: "web_search_tool_result",
+          content: [{ type: "web_search_result", url: "https://a", title: "A" }],
+        },
+      ],
+    }),
+  })
+  const results = await provider.execute({ query: "hi" }, {})
+  assert.equal(results[0].content, "ANSWER")
+  assert.equal(results[1].url, "https://a")
+})
+
+test("success bodies are capped at 8 MiB", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  let pulls = 0
+  const chunk = new TextEncoder().encode("x".repeat(65_536))
+  const stream = new ReadableStream({
+    pull(controller) {
+      pulls++
+      if (pulls > 200) {
+        controller.close()
+        return
+      }
+      controller.enqueue(chunk)
+    },
+  })
+  globalThis.fetch = async () => new Response(stream, { status: 200 })
+  await assert.rejects(() => provider.execute({ query: "hi" }, {}), /invalid response/)
+  assert.ok(pulls > 100 && pulls <= 140, `pulls=${pulls}`)
+})

@@ -845,7 +845,9 @@ export function extractAnswerAndSources(data: DeepSeekResponse): {
     }
   }
 
-  if (toolError) throw new Error(`Web search error: ${toolError}`)
+  if (toolError && textParts.length === 0 && collected.length === 0) {
+    throw new Error(`Web search error: ${toolError}`)
+  }
   return { answer: textParts.join("\n\n"), sources: dedupeSources(collected) }
 }
 
@@ -1285,15 +1287,15 @@ export const plugin = {
 
     // Resolve the model once; a timed-out lookup uses the preset immediately
     // and refreshes in the background when the model API responds.
-    const initialModel =
-      searchApi === "native" ? undefined : await raceTimeout(resolveModel(ctx, options), 2000)
+    const modelPromise = searchApi === "native" ? undefined : resolveModel(ctx, options)
+    const initialModel = modelPromise ? await raceTimeout(modelPromise, 2000) : undefined
     let cachedModel: string | undefined = initialModel ?? getPreset(provider)?.defaultModel
     let modelResolved = initialModel !== undefined
     let refreshing = false
     const refreshModel = () => {
-      if (refreshing || modelResolved) return
+      if (refreshing || modelResolved || !modelPromise) return
       refreshing = true
-      void resolveModel(ctx, options)
+      void raceTimeout(modelPromise, 5000)
         .then((resolved) => {
           if (resolved !== undefined) {
             cachedModel = resolved
