@@ -962,7 +962,16 @@ function remoteMessage(value: unknown, fallback: string): string {
     .slice(0, 300)
     .join("")
     .replace(/[\uD800-\uDFFF]/gu, "\uFFFD")
-  return result || fallback
+  const visible = Array.from(result).some((char) => {
+    const code = char.codePointAt(0) ?? 0
+    return !(
+      code === 0x200d ||
+      code === 0xe0001 ||
+      (code >= 0xe0020 && code <= 0xe007f) ||
+      (code >= 0xfe00 && code <= 0xfe0f)
+    )
+  })
+  return visible ? result : fallback
 }
 
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -1274,30 +1283,33 @@ export const plugin = {
       resolveSearchBaseUrl(options)
     }
 
-    // Resolve the model once; a timed-out lookup keeps the preset fallback but
-    // is retried lazily on the next call. The native Search API needs no model.
+    // Resolve the model once; a timed-out lookup uses the preset immediately
+    // and refreshes in the background when the model API responds.
     const initialModel =
       searchApi === "native" ? undefined : await raceTimeout(resolveModel(ctx, options), 2000)
     let cachedModel: string | undefined = initialModel ?? getPreset(provider)?.defaultModel
     let modelResolved = initialModel !== undefined
+    let refreshing = false
+    const refreshModel = () => {
+      if (refreshing || modelResolved) return
+      refreshing = true
+      void resolveModel(ctx, options)
+        .then((resolved) => {
+          if (resolved !== undefined) {
+            cachedModel = resolved
+            modelResolved = true
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          refreshing = false
+        })
+    }
     const getModel = async (signal?: AbortSignal): Promise<string | undefined> => {
       if (searchApi === "native") return undefined
-      if (modelResolved && cachedModel) return cachedModel
       if (signal?.aborted) throwCancellation(signal, undefined)
-      try {
-        const resolved = await raceTimeout(resolveModel(ctx, options), 2000, signal)
-        if (signal?.aborted) throwCancellation(signal, undefined)
-        if (resolved !== undefined) {
-          cachedModel = resolved
-          modelResolved = true
-        } else if (!cachedModel) {
-          cachedModel = getPreset(provider)?.defaultModel
-        }
-        return cachedModel
-      } catch (error) {
-        if (signal?.aborted) throwCancellation(signal, error)
-        throw error
-      }
+      if (!modelResolved) refreshModel()
+      return cachedModel
     }
 
     await ctx.websearch.transform((editor) => {

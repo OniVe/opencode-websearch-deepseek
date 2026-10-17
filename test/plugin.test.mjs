@@ -1948,27 +1948,31 @@ test("messages does not return results aborted during response parsing", async (
   )
 })
 
-test("aborting during the lazy model lookup rejects promptly", async () => {
+test("a timed-out model lookup does not block and recovers in the background", async () => {
   let captured
   await plugin.setup({
-    options: { provider: "anthropic", apiKey: "k" },
+    options: { provider: "deepseek", apiKey: "k" },
     model: {
       async default() {
-        await new Promise((resolve) => setTimeout(resolve, 600))
-        return { providerID: "other", modelID: "x" }
+        await new Promise((resolve) => setTimeout(resolve, 2500))
+        return { providerID: "deepseek", modelID: "recovered" }
       },
     },
     websearch: { async transform(callback) { callback({ add(provider) { captured = provider }, default: { set() {} } }) } },
   })
-  const controller = new AbortController()
+  let body
+  globalThis.fetch = async (_url, init) => {
+    body = JSON.parse(init.body)
+    return { ok: true, status: 200, text: async () => "", json: async () => ({ content: [] }) }
+  }
   const started = Date.now()
-  const call = captured.execute({ query: "hi" }, { signal: controller.signal })
-  setTimeout(() => controller.abort("mid-model"), 10)
-  await assert.rejects(
-    () => call,
-    (error) => error instanceof Error && /mid-model/.test(error.message),
-  )
-  assert.ok(Date.now() - started < 150)
+  await captured.execute({ query: "first" }, {})
+  assert.ok(Date.now() - started < 500)
+  assert.equal(body.model, "deepseek-v4-flash")
+
+  await new Promise((resolve) => setTimeout(resolve, 2800))
+  await captured.execute({ query: "second" }, {})
+  assert.equal(body.model, "recovered")
 })
 
 test("native options fall back to environment variables", async () => {
@@ -2122,44 +2126,6 @@ test("plain AbortError-like objects are wrapped", async () => {
     (error) =>
       error instanceof Error && !(error instanceof DOMException) && /aborted/.test(error.message),
   )
-})
-
-test("model lookup timer is cleared on abort", async () => {
-  let captured
-  await plugin.setup({
-    options: { provider: "anthropic", apiKey: "k" },
-    model: {
-      async default() {
-        await new Promise((resolve) => setTimeout(resolve, 600))
-        return { providerID: "other", modelID: "x" }
-      },
-    },
-    websearch: { async transform(callback) { callback({ add(provider) { captured = provider }, default: { set() {} } }) } },
-  })
-
-  const originalSet = globalThis.setTimeout
-  const originalClear = globalThis.clearTimeout
-  let lookupTimer
-  let cleared = false
-  globalThis.setTimeout = (fn, ms, ...args) => {
-    const handle = originalSet(fn, ms, ...args)
-    if (ms === 2000) lookupTimer = handle
-    return handle
-  }
-  globalThis.clearTimeout = (handle) => {
-    if (handle === lookupTimer) cleared = true
-    return originalClear(handle)
-  }
-  try {
-    const controller = new AbortController()
-    const call = captured.execute({ query: "hi" }, { signal: controller.signal })
-    originalSet(() => controller.abort(new Error("timer-abort")), 10)
-    await assert.rejects(() => call, /timer-abort/)
-  } finally {
-    globalThis.setTimeout = originalSet
-    globalThis.clearTimeout = originalClear
-  }
-  assert.equal(cleared, true)
 })
 
 test("non-2xx bodies are sanitized", async () => {
@@ -2363,29 +2329,6 @@ test("tool registration failure is logged and setup still succeeds", async () =>
   assert.match(warnings[0], /tool-domain-boom/)
 })
 
-test("a timed-out model lookup is retried lazily", async () => {
-  let calls = 0
-  let captured
-  await plugin.setup({
-    options: { provider: "deepseek", apiKey: "k" },
-    model: {
-      async default() {
-        calls++
-        if (calls === 1) return new Promise(() => {})
-        return { providerID: "deepseek", modelID: "recovered" }
-      },
-    },
-    websearch: { async transform(callback) { callback({ add(provider) { captured = provider }, default: { set() {} } }) } },
-  })
-  let body
-  globalThis.fetch = async (_url, init) => {
-    body = JSON.parse(init.body)
-    return { ok: true, status: 200, text: async () => "", json: async () => ({ content: [] }) }
-  }
-  await captured.execute({ query: "hi" }, {})
-  assert.equal(body.model, "recovered")
-})
-
 test("native abort wins when the transport ignores the signal", async () => {
   const provider = await registerWith({ searchApi: "native", apiKey: "k" })
   await new Promise((resolve) => setTimeout(resolve, 250))
@@ -2411,5 +2354,74 @@ test("a single oversized chunk keeps its prefix", async () => {
   await assert.rejects(
     () => provider.execute({ query: "hi" }, {}),
     (error) => error instanceof Error && /PREFIX-/.test(error.message),
+  )
+})
+
+test("error body reads stop at the cap", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  let pulls = 0
+  const stream = new ReadableStream({
+    pull(controller) {
+      pulls++
+      if (pulls > 100) {
+        controller.close()
+        return
+      }
+      controller.enqueue(new TextEncoder().encode("E".repeat(65_536)))
+    },
+  })
+  globalThis.fetch = async () => new Response(stream, { status: 500 })
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, {}),
+    (error) => error instanceof Error,
+  )
+  assert.ok(pulls <= 3, `pulls=${pulls}`)
+})
+
+test("a non-resolving cancel does not hang the call", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode("PREFIX-" + "E".repeat(100_000)))
+    },
+    cancel() {
+      return new Promise(() => {})
+    },
+  })
+  globalThis.fetch = async () => new Response(stream, { status: 500 })
+  const started = Date.now()
+  await assert.rejects(() => provider.execute({ query: "hi" }, {}), /PREFIX-/)
+  assert.ok(Date.now() - started < 500)
+})
+
+test("error sanitizer preserves ZWJ/tag emoji but strips other format chars", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  const code = "A\u200D\u{E0061}\u200B\u2060\u202EB"
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => "",
+    json: async () => ({
+      content: [
+        {
+          type: "web_search_tool_result",
+          content: { type: "web_search_tool_result_error", error_code: code },
+        },
+      ],
+    }),
+  })
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, {}),
+    (error) => {
+      if (!(error instanceof Error)) return false
+      return (
+        error.message.includes("\u200D") &&
+        error.message.includes("\u{E0061}") &&
+        !/[\u200B\u2060\u202E]/.test(error.message)
+      )
+    },
   )
 })
