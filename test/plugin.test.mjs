@@ -2047,6 +2047,10 @@ test("messages surfaces a web search tool error", async () => {
       { type: "web_search_tool_result", content: [{ type: "web_search_tool_result_error", error_code: "unavailable" }] },
       /unavailable/,
     ],
+    [
+      { type: "web_search_tool_result", content: [{ type: "web_search_tool_result_error" }] },
+      /web_search_tool_result_error/,
+    ],
   ]
   for (const [block, expected] of cases) {
     globalThis.fetch = async () => ({
@@ -2184,4 +2188,85 @@ test("fetch abort reasons are normalized mid-flight", async () => {
     () => provider.execute({ query: "hi" }, { signal: controller.signal }),
     (error) => error instanceof Error && /raw-fetch/.test(error.message),
   )
+})
+
+test("native non-2xx bodies are sanitized", async () => {
+  const provider = await registerWith({ searchApi: "native", apiKey: "k" })
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 500,
+    text: async () => "denied\u0000\u001b[31mred\u0007\u202e\u2028text",
+    json: async () => ({}),
+  })
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, {}),
+    (error) =>
+      error instanceof Error &&
+      !/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e]/.test(error.message),
+  )
+})
+
+test("200 error messages are sanitized on both backends", async () => {
+  const messages = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => "",
+    json: async () => ({ error: { message: "bad\u001b[31mred\u202e" } }),
+  })
+  await assert.rejects(
+    () => messages.execute({ query: "hi" }, {}),
+    (error) => error instanceof Error && !/[\u001b\u202e]/.test(error.message),
+  )
+
+  const native = await registerWith({ searchApi: "native", apiKey: "k" })
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => "",
+    json: async () => ({ error: { message: "bad\u001b[31mred\u202e" } }),
+  })
+  await assert.rejects(
+    () => native.execute({ query: "hi" }, {}),
+    (error) => error instanceof Error && !/[\u001b\u202e]/.test(error.message),
+  )
+})
+
+test("tool error codes are truncated by code points and well-formed", async () => {
+  const provider = await register()
+  process.env.DEEPSEEK_API_KEY = "test-key"
+  for (const code of ["𝕏".repeat(500), "a".repeat(299) + "\uD800" + "b"]) {
+    globalThis.fetch = async () => ({
+      ok: true,
+      status: 200,
+      text: async () => "",
+      json: async () => ({
+        content: [
+          {
+            type: "web_search_tool_result",
+            content: { type: "web_search_tool_result_error", error_code: code },
+          },
+        ],
+      }),
+    })
+    await assert.rejects(
+      () => provider.execute({ query: "hi" }, {}),
+      (error) =>
+        error instanceof Error &&
+        Array.from(error.message).length <= 330 &&
+        error.message.isWellFormed(),
+    )
+  }
+})
+
+test("abort wins when the transport ignores the signal", async () => {
+  const provider = await registerWith({ searchApi: "native", apiKey: "k" })
+  const controller = new AbortController()
+  globalThis.fetch = () => new Promise(() => {})
+  const started = Date.now()
+  const call = provider.execute({ query: "hi" }, { signal: controller.signal })
+  setTimeout(() => controller.abort(new Error("transport-abort")), 10)
+  await assert.rejects(() => call, /transport-abort/)
+  assert.ok(Date.now() - started < 200)
 })

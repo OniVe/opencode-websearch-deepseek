@@ -531,7 +531,9 @@ function throwCancellation(signal: AbortSignal, fallback: unknown): never {
   if (typeof reason === "object" && reason !== null) {
     throw new Error("The web search was aborted", { cause: reason })
   }
-  if (typeof reason === "string" && reason.trim()) throw new Error(reason.trim())
+  if (typeof reason === "string" && reason.trim()) {
+    throw new Error(remoteMessage(reason, "The web search was aborted"))
+  }
   if (reason !== undefined && reason !== null) {
     // Non-string primitives (e.g. 0) are not useful messages; keep them as cause.
     throw new Error("The web search was aborted", { cause: reason })
@@ -751,7 +753,7 @@ function isHttpSourceUrl(value: string): boolean {
   if (/^https?:\/\/[/\\]/i.test(value)) return false
   // Reject raw control/format characters and backslashes that URL parsers normalize.
   if (
-    /[\u0000-\u001f\u007f-\u009f\u2028\u2029\\\u034F]|\p{Cf}|[\u180B-\u180D\u180F\uFE00-\uFE0F\u{E0100}-\u{E01EF}]/u.test(
+    /[\u0000-\u001f\u007f-\u009f\u2028\u2029\\\u034F\uD800-\uDFFF]|\p{Cf}|[\u180B-\u180D\u180F\uFE00-\uFE0F\u{E0100}-\u{E01EF}]/u.test(
       value,
     )
   ) {
@@ -944,12 +946,76 @@ function extractErrorMessage(text: string): string {
 /** Normalize a remote error code/message for an error string. */
 function remoteMessage(value: unknown, fallback: string): string {
   const text = typeof value === "string" && value.trim() ? value.trim() : fallback
-  const head = text.slice(0, 4096)
-  const sanitized = head.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]|\p{Cf}/gu, " ")
+  const sanitized = text.replace(
+    /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c]/g,
+    " ",
+  )
   return Array.from(sanitized)
     .slice(0, 300)
     .join("")
-    .replace(/[\uD800-\uDBFF]$/, "")
+    .replace(/[\uD800-\uDFFF]/gu, "\uFFFD")
+}
+
+const MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+const MAX_ERROR_BYTES = 64 * 1024
+
+/** Read a response stream up to `maxBytes`, then stop (bounded memory). */
+async function readStreamLimited(
+  body: ReadableStream<Uint8Array>,
+  maxBytes: number,
+  signal?: AbortSignal,
+): Promise<string> {
+  const reader = body.getReader()
+  const decoder = new TextDecoder()
+  let text = ""
+  let bytes = 0
+  try {
+    for (;;) {
+      const { done, value } = await withAbort(reader.read(), signal)
+      if (done) break
+      if (!value) continue
+      bytes += value.byteLength
+      if (bytes > maxBytes) {
+        await reader.cancel().catch(() => {})
+        break
+      }
+      text += decoder.decode(value, { stream: true })
+    }
+    return text + decoder.decode()
+  } finally {
+    try {
+      reader.releaseLock()
+    } catch {
+      // Already released.
+    }
+  }
+}
+
+/** Read a text body, streaming when the transport exposes a body. */
+async function readTextLimited(
+  response: Response,
+  maxBytes: number,
+  signal?: AbortSignal,
+): Promise<string> {
+  const body = response.body
+  if (!body) return withAbort(response.text(), signal)
+  return readStreamLimited(body, maxBytes, signal)
+}
+
+/** Read a JSON body, streaming when the transport exposes a body. */
+async function readJsonLimited(
+  response: Response,
+  maxBytes: number,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  const body = response.body
+  if (!body) return withAbort(response.json(), signal)
+  const text = await readStreamLimited(body, maxBytes, signal)
+  try {
+    return JSON.parse(text)
+  } catch {
+    throw new Error("Web search API returned an invalid response")
+  }
 }
 
 /** POST JSON to a native DeepSeek tool endpoint and parse the response. */
@@ -960,15 +1026,18 @@ async function postNativeTool(
   signal?: AbortSignal,
 ): Promise<unknown> {
   if (signal?.aborted) throwCancellation(signal, undefined)
-  const response = await fetch(url, {
-    method: "POST",
+  const response = await withAbort(
+    fetch(url, {
+      method: "POST",
+      signal,
+      headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify(body),
+    }),
     signal,
-    headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify(body),
-  })
+  )
 
   if (!response.ok) {
-    const text = await response.text().catch((error: unknown) => {
+    const text = await readTextLimited(response, MAX_ERROR_BYTES, signal).catch((error: unknown) => {
       if (signal?.aborted) return throwCancellation(signal, error)
       if ((error as { name?: string } | undefined)?.name === "AbortError") throw error
       const detail = error instanceof Error ? error.message : String(error)
@@ -976,11 +1045,11 @@ async function postNativeTool(
     })
     if (signal?.aborted) throwCancellation(signal, undefined)
     throw new Error(
-      `Web search API error ${response.status}: ${remoteMessage(extractErrorMessage(text.slice(0, 4096)), "unknown error")}`,
+      `Web search API error ${response.status}: ${remoteMessage(extractErrorMessage(text), "unknown error")}`,
     )
   }
 
-  const data = (await response.json()) as unknown
+  const data = await readJsonLimited(response, MAX_RESPONSE_BYTES, signal)
   if (signal?.aborted) throwCancellation(signal, undefined)
   return data
 }
@@ -1129,19 +1198,22 @@ export async function searchDeepSeek(
     })
 
     if (signal?.aborted) throwCancellation(signal, undefined)
-    const response = await fetch(endpoint, {
-      method: "POST",
+    const response = await withAbort(
+      fetch(endpoint, {
+        method: "POST",
+        signal,
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": ANTHROPIC_VERSION,
+        },
+        body: JSON.stringify(body),
+      }),
       signal,
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": ANTHROPIC_VERSION,
-      },
-      body: JSON.stringify(body),
-    })
+    )
 
     if (!response.ok) {
-      const text = await response.text().catch((error: unknown) => {
+      const text = await readTextLimited(response, MAX_ERROR_BYTES, signal).catch((error: unknown) => {
         // Preserve cancellation: never turn an abort into an API error.
         if (signal?.aborted) return throwCancellation(signal, error)
         if ((error as { name?: string } | undefined)?.name === "AbortError") throw error
@@ -1152,11 +1224,11 @@ export async function searchDeepSeek(
       // not masked as an API error.
       if (signal?.aborted) throwCancellation(signal, undefined)
       throw new Error(
-        `Web search API error ${response.status}: ${remoteMessage(extractErrorMessage(text.slice(0, 4096)), "unknown error")}`,
+        `Web search API error ${response.status}: ${remoteMessage(extractErrorMessage(text), "unknown error")}`,
       )
     }
 
-    const data = (await response.json()) as DeepSeekResponse
+    const data = (await readJsonLimited(response, MAX_RESPONSE_BYTES, signal)) as DeepSeekResponse
     // A cancellation may arrive after the response completed.
     if (signal?.aborted) throwCancellation(signal, undefined)
     if (!data || !Array.isArray(data.content)) {
