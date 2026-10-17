@@ -10,13 +10,23 @@
  * DeepSeek is the default provider (its Anthropic-compatible endpoint emulates
  * the same protocol); any Anthropic-compatible endpoint can be selected.
  *
+ * DeepSeek also exposes native JSON Search & Fetch APIs. Set
+ * `searchApi: "native"` to use them instead of the Messages tool: the search
+ * returns structured results, and the top results can be enriched with full
+ * page Markdown through the Fetch API.
+ *
  * Environment:
- *   DEEPSEEK_API_KEY     DeepSeek API key (default provider).
- *   ANTHROPIC_API_KEY    Anthropic API key (provider "anthropic").
- *   WEBSEARCH_API_KEY    Generic fallback API key.
- *   WEBSEARCH_MODEL      Model override.
- *   WEBSEARCH_MAX_USES   Max server-side searches per query, defaults to 5.
- *   WEBSEARCH_THINKING   "enabled" (default) or "disabled".
+ *   DEEPSEEK_API_KEY        DeepSeek API key (default provider).
+ *   ANTHROPIC_API_KEY       Anthropic API key (provider "anthropic").
+ *   WEBSEARCH_API_KEY       Generic fallback API key.
+ *   WEBSEARCH_MODEL         Model override.
+ *   WEBSEARCH_MAX_USES      Max server-side searches per query, defaults to 5.
+ *   WEBSEARCH_THINKING      "enabled" (default) or "disabled".
+ *   WEBSEARCH_SEARCH_API    "messages" (default) or "native".
+ *   WEBSEARCH_SEARCH_BASE_URL  Base URL for the native Search & Fetch APIs.
+ *   WEBSEARCH_COUNT         Native result count (1-50), defaults to 10.
+ *   WEBSEARCH_NEED_CONTENT  "true" to request page content from native search.
+ *   WEBSEARCH_FETCH         Fetch full page Markdown for the top N results.
  */
 
 /** Default DeepSeek model used for search + synthesis. */
@@ -30,6 +40,21 @@ export const ANTHROPIC_VERSION = "2023-06-01"
 
 /** DeepSeek Anthropic-compatible Messages endpoint. */
 export const API_URL = "https://api.deepseek.com/anthropic/v1/messages"
+
+/** DeepSeek native Search endpoint. */
+export const SEARCH_URL = "https://api.deepseek.com/v1/tools/search"
+
+/** DeepSeek native Fetch endpoint. */
+export const FETCH_URL = "https://api.deepseek.com/v1/tools/fetch"
+
+/** Base URL of the native DeepSeek Search & Fetch APIs. */
+export const NATIVE_BASE_URL = "https://api.deepseek.com"
+
+/** Default number of results requested from the native Search API. */
+export const DEFAULT_COUNT = 10
+
+/** Maximum number of results accepted by the native Search API. */
+export const MAX_COUNT = 50
 
 /** Fallback URL used when a result has no source of its own. */
 export const FALLBACK_URL = "https://api.deepseek.com"
@@ -110,6 +135,14 @@ export interface DeepSeekSource {
   title?: string
   /** Snippet for this source, taken from a `citations[].cited_text` field. */
   content?: string
+}
+
+/** Search backend: the Anthropic Messages tool or the native DeepSeek JSON API. */
+export type SearchApi = "messages" | "native"
+
+/** Minimal shape of a native Search API response. */
+export interface NativeSearchResponse {
+  results?: unknown
 }
 
 /** Options accepted by {@link buildRequestBody}. */
@@ -210,6 +243,16 @@ export interface WebsearchOptions {
   maxUses?: number | string
   /** `enabled` or `disabled`. */
   thinking?: string
+  /** Search backend: `messages` (default) or `native`. */
+  searchApi?: string
+  /** Base URL for the native Search & Fetch APIs. */
+  searchBaseUrl?: string
+  /** Number of native results to request (1-50). */
+  count?: number | string
+  /** Ask the native Search API for page content (`need_content`). */
+  needContent?: boolean | string
+  /** Fetch full page Markdown for the top N native results (0 disables). */
+  fetch?: number | string
 }
 
 /** Context passed to the plugin's `setup`. */
@@ -250,6 +293,88 @@ export function resolveEndpoint(options?: WebsearchOptions): string {
   const preset = getPreset(provider)
   if (preset) return preset.endpoint
   throw new Error(`Unknown provider "${provider}": set the baseUrl plugin option to its /v1/messages URL`)
+}
+
+/**
+ * Resolve the search backend. Unknown explicit values are rejected so a typo
+ * does not silently fall back to the other backend.
+ */
+export function resolveSearchApi(options?: WebsearchOptions): SearchApi {
+  const raw = readString(options?.searchApi) ?? readEnv("WEBSEARCH_SEARCH_API")
+  if (!raw) return "messages"
+  const normalized = raw.toLowerCase()
+  if (normalized === "messages" || normalized === "native") return normalized
+  throw new Error(`Invalid searchApi "${raw}": expected "messages" or "native"`)
+}
+
+/**
+ * Resolve the base URL for the native Search & Fetch APIs. An explicit
+ * `searchBaseUrl` wins; otherwise it is derived from a custom Messages
+ * endpoint, then from the DeepSeek default.
+ */
+export function resolveSearchBaseUrl(options?: WebsearchOptions): string {
+  const override = readString(options?.searchBaseUrl) ?? readEnv("WEBSEARCH_SEARCH_BASE_URL")
+  if (override) {
+    if (!/^https?:\/\//i.test(override)) {
+      throw new Error(`Invalid searchBaseUrl "${override}": expected an http(s) URL`)
+    }
+    return override.replace(/\/+$/, "")
+  }
+
+  const baseUrl = readString(options?.baseUrl)
+  if (baseUrl) {
+    if (!/^https?:\/\//i.test(baseUrl)) {
+      throw new Error(`Invalid baseUrl "${baseUrl}": expected an http(s) URL`)
+    }
+    return baseUrl
+      .replace(/\/anthropic\/v1\/messages\/?$/i, "")
+      .replace(/\/v1\/messages\/?$/i, "")
+      .replace(/\/+$/, "")
+  }
+
+  if (resolveProvider(options) === DEFAULT_PROVIDER) return NATIVE_BASE_URL
+  throw new Error('searchApi "native" requires the deepseek provider or the searchBaseUrl plugin option')
+}
+
+/** Parse an integer in `[min, max]` from a number or a plain-integer string. */
+function pickIntegerInRange(value: unknown, min: number, max: number): number | undefined {
+  let parsed: number | undefined
+  if (typeof value === "number") {
+    parsed = value
+  } else if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+    parsed = Number(value.trim())
+  }
+  if (parsed === undefined || !Number.isSafeInteger(parsed)) return undefined
+  return parsed >= min && parsed <= max ? parsed : undefined
+}
+
+/** Parse a boolean from a boolean or a common string spelling. */
+function pickBoolean(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") return value
+  if (typeof value !== "string") return undefined
+  const normalized = value.trim().toLowerCase()
+  if (normalized === "1" || normalized === "true" || normalized === "on" || normalized === "yes") {
+    return true
+  }
+  if (normalized === "0" || normalized === "false" || normalized === "off" || normalized === "no") {
+    return false
+  }
+  return undefined
+}
+
+/** Resolve how many native results to request. Invalid input falls back to 10. */
+export function resolveCount(raw: unknown = process.env.WEBSEARCH_COUNT): number {
+  return pickIntegerInRange(raw, 1, MAX_COUNT) ?? DEFAULT_COUNT
+}
+
+/** Resolve the native `need_content` flag. */
+export function resolveNeedContent(raw: unknown = process.env.WEBSEARCH_NEED_CONTENT): boolean {
+  return pickBoolean(raw) ?? false
+}
+
+/** Resolve how many top results to enrich through the Fetch API. */
+export function resolveFetchCount(raw: unknown = process.env.WEBSEARCH_FETCH): number {
+  return pickIntegerInRange(raw, 0, MAX_COUNT) ?? 0
 }
 
 /** Human-readable name for the websearch provider entry. */
@@ -500,6 +625,24 @@ export function dedupeSources(sources: readonly DeepSeekSource[]): DeepSeekSourc
 }
 
 /**
+ * Map native Search API results to the plugin's source shape. Page `content`
+ * wins when present, then the API's model-oriented `summary` (600-800 chars),
+ * then the short `snippet`.
+ */
+export function mapNativeResults(results: unknown): DeepSeekSource[] {
+  if (!Array.isArray(results)) return []
+  const mapped: DeepSeekSource[] = []
+  for (const item of results as Array<Record<string, unknown>>) {
+    const url = readString(item?.url)
+    if (!url) continue
+    const content =
+      readString(item.content) ?? readString(item.summary) ?? readString(item.snippet) ?? ""
+    mapped.push({ url, title: readString(item.title) ?? url, content })
+  }
+  return dedupeSources(mapped)
+}
+
+/**
  * Split a response into a synthesized answer and its source URLs. Sources
  * reported by multiple search rounds are de-duplicated by URL.
  */
@@ -602,6 +745,138 @@ export function toSourceObjects(
     .map((source) => ({ url: source.url, title: source.title || source.url, content: source.content ?? "" }))
 }
 
+/** Read and validate the API key, with a provider-specific error. */
+async function requireApiKey(
+  ctx: WebsearchContext,
+  options: WebsearchOptions | undefined,
+  signal?: AbortSignal,
+): Promise<{ provider: string; apiKey: string }> {
+  const provider = resolveProvider(options)
+  const apiKey = await resolveApiKey(ctx, options, signal)
+  if (!apiKey) {
+    throw new Error(
+      `No API key for provider "${provider}": set its environment variable, pass the apiKey plugin option, or sign in to the "${provider}" provider in OpenCode`,
+    )
+  }
+  if (!/^[\x21-\x7e]+$/.test(apiKey)) {
+    throw new Error("The API key contains invalid characters")
+  }
+  return { provider, apiKey }
+}
+
+/** Pull a human-readable message out of an OpenAI-style error body. */
+function extractErrorMessage(text: string): string {
+  try {
+    const parsed = JSON.parse(text) as { error?: { message?: unknown } }
+    const message = parsed?.error?.message
+    if (typeof message === "string" && message.trim()) return message.trim()
+  } catch {
+    // Not JSON: use the raw body.
+  }
+  return text
+}
+
+/** POST JSON to a native DeepSeek tool endpoint and parse the response. */
+async function postNativeTool(
+  url: string,
+  apiKey: string,
+  body: unknown,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  const response = await fetch(url, {
+    method: "POST",
+    signal,
+    headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify(body),
+  })
+
+  if (!response.ok) {
+    const text = await response.text().catch((error: unknown) => {
+      if (signal?.aborted) return throwCancellation(signal, error)
+      if ((error as { name?: string } | undefined)?.name === "AbortError") throw error
+      const detail = error instanceof Error ? error.message : String(error)
+      return `[body read failed: ${detail}]`
+    })
+    if (signal?.aborted) throwCancellation(signal, undefined)
+    throw new Error(`Web search API error ${response.status}: ${extractErrorMessage(text).slice(0, 300)}`)
+  }
+
+  const data = (await response.json()) as unknown
+  if (signal?.aborted) throwCancellation(signal, undefined)
+  return data
+}
+
+/** Fetch one page as Markdown; any non-abort failure is treated as absent. */
+async function fetchNativePage(
+  baseUrl: string,
+  apiKey: string,
+  url: string,
+  signal?: AbortSignal,
+): Promise<{ title?: string; content?: string } | undefined> {
+  try {
+    const data = (await postNativeTool(`${baseUrl}/v1/tools/fetch`, apiKey, { url }, signal)) as
+      | { title?: unknown; content?: unknown }
+      | undefined
+    return { title: readString(data?.title), content: readString(data?.content) }
+  } catch (error) {
+    if (signal?.aborted) throwCancellation(signal, error)
+    return undefined
+  }
+}
+
+/** Replace the top-N snippets with full page Markdown, sequentially (5 QPS). */
+async function enrichWithFetch(
+  baseUrl: string,
+  apiKey: string,
+  sources: readonly DeepSeekSource[],
+  limit: number,
+  signal?: AbortSignal,
+): Promise<DeepSeekSource[]> {
+  const enriched = [...sources]
+  const count = Math.min(limit, enriched.length)
+  for (let index = 0; index < count; index++) {
+    const source = enriched[index]
+    if (!source) continue
+    const page = await fetchNativePage(baseUrl, apiKey, source.url, signal)
+    if (!page) continue
+    enriched[index] = {
+      ...source,
+      title: page.title || source.title,
+      content: page.content || source.content,
+    }
+  }
+  return enriched
+}
+
+/** Run one search through the native Search & Fetch APIs. */
+async function nativeSearch(
+  ctx: WebsearchContext,
+  options: WebsearchOptions,
+  query: string,
+  signal?: AbortSignal,
+): Promise<{ answer: string; sources: DeepSeekSource[] }> {
+  const { apiKey } = await requireApiKey(ctx, options, signal)
+  const baseUrl = resolveSearchBaseUrl(options)
+  const count = pickIntegerInRange(options.count, 1, MAX_COUNT) ?? resolveCount(readEnv("WEBSEARCH_COUNT"))
+  const needContent =
+    pickBoolean(options.needContent) ?? resolveNeedContent(readEnv("WEBSEARCH_NEED_CONTENT"))
+  const fetchCount =
+    pickIntegerInRange(options.fetch, 0, MAX_COUNT) ?? resolveFetchCount(readEnv("WEBSEARCH_FETCH"))
+
+  const data = (await postNativeTool(
+    `${baseUrl}/v1/tools/search`,
+    apiKey,
+    { query, count, need_content: needContent },
+    signal,
+  )) as NativeSearchResponse | undefined
+
+  let sources = mapNativeResults(data?.results)
+  if (fetchCount > 0 && sources.length > 0) {
+    sources = await enrichWithFetch(baseUrl, apiKey, sources, fetchCount, signal)
+  }
+  return { answer: "", sources }
+}
+
 /**
  * Run one search through the configured provider. Shared by the websearch
  * provider and the Code Mode tool so both always behave identically.
@@ -617,17 +892,13 @@ export async function searchDeepSeek(
   const trimmedQuery = typeof query === "string" ? query.trim() : ""
   try {
     if (!trimmedQuery) throw new Error("query must be a non-empty string")
+    if (resolveSearchApi(options) === "native") {
+      return await nativeSearch(ctx, options, trimmedQuery, signal)
+    }
+
     // Resolve the endpoint first so an unknown provider fails before key/model.
     const endpoint = resolveEndpoint(options)
-    const apiKey = await resolveApiKey(ctx, options, signal)
-    if (!apiKey) {
-      throw new Error(
-        `No API key for provider "${provider}": set its environment variable, pass the apiKey plugin option, or sign in to the "${provider}" provider in OpenCode`,
-      )
-    }
-    if (!/^[\x21-\x7e]+$/.test(apiKey)) {
-      throw new Error("The API key contains invalid characters")
-    }
+    const { apiKey } = await requireApiKey(ctx, options, signal)
     if (!model) {
       throw new Error(`No model for provider "${provider}": set the model plugin option or WEBSEARCH_MODEL`)
     }
@@ -682,11 +953,21 @@ export const plugin = {
   async setup(ctx: WebsearchContext): Promise<void> {
     const options = (ctx.options ?? {}) as WebsearchOptions
     const provider = resolveProvider(options)
+    const searchApi = resolveSearchApi(options)
+    if (searchApi === "native") {
+      // Validate the native endpoint configuration at startup (fail fast).
+      resolveSearchBaseUrl(options)
+    }
+
     // Resolve the model once, but re-try lazily if the first attempt timed out
-    // (e.g. a slow model API on start-up for a non-preset provider).
-    let cachedModel =
-      (await raceTimeout(resolveModel(ctx, options), 2000)) ?? getPreset(provider)?.defaultModel
+    // (e.g. a slow model API on start-up for a non-preset provider). The native
+    // Search API needs no model, so skip the lookup entirely.
+    let cachedModel: string | undefined =
+      searchApi === "native"
+        ? undefined
+        : ((await raceTimeout(resolveModel(ctx, options), 2000)) ?? getPreset(provider)?.defaultModel)
     const getModel = async (): Promise<string | undefined> => {
+      if (searchApi === "native") return undefined
       if (cachedModel) return cachedModel
       cachedModel = (await raceTimeout(resolveModel(ctx, options), 2000)) ?? getPreset(provider)?.defaultModel
       return cachedModel
@@ -713,7 +994,7 @@ export const plugin = {
           editor.namespace({ name: "websearch", description: "Web search" })
           editor.add({
             name: "search",
-            description: "Search the web. Returns a synthesized answer with source URLs.",
+            description: "Search the web and return relevant results with source URLs.",
             input: {
               type: "object",
               properties: { query: { type: "string", minLength: 1, description: "Search query" } },
