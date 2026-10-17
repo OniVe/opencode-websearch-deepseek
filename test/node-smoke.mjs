@@ -84,11 +84,23 @@ results = await provider.execute({ query: "hi" }, {})
 assert.equal(results[0].content, "PARTIAL")
 assert.equal(results[1].url, "https://a.example/x")
 
-globalThis.fetch = async () => new Response("E".repeat(100_000), { status: 500 })
+let errorPulls = 0
+const errorStream = new ReadableStream({
+  pull(controller) {
+    errorPulls++
+    if (errorPulls > 100) {
+      controller.close()
+      return
+    }
+    controller.enqueue(new TextEncoder().encode("E".repeat(65_536)))
+  },
+})
+globalThis.fetch = async () => new Response(errorStream, { status: 500 })
 await assert.rejects(
   () => provider.execute({ query: "hi" }, {}),
-  (error) => error instanceof Error && error.message.length <= 330,
+  (error) => error instanceof Error && error.message.length <= 330 && /E{10}/.test(error.message),
 )
+assert.ok(errorPulls <= 2, `errorPulls=${errorPulls}`)
 
 const native = await setupProvider({ searchApi: "native", apiKey: "smoke-key", count: 1 })
 globalThis.fetch = async () =>
