@@ -8,17 +8,29 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        node-version: [22, 24]
     steps:
       - uses: actions/checkout@v4
-      - name: Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
         with:
-          node-version: ${{ matrix.node-version }}
-          cache: npm
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run lint
+      - run: bun run test
+
+  node-compat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - run: bun run build
+      - name: Import the built plugin on Node 22
+        run: node -e "import('./dist/index.js').then((m) => { if (typeof m.plugin?.setup !== 'function') process.exit(1) })"

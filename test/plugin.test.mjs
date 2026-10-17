@@ -1,20 +1,19 @@
-import { after, before, beforeEach, test } from "node:test"
+import { afterAll, beforeAll, beforeEach, test } from "bun:test"
 import assert from "node:assert/strict"
 
 import plugin, {
   ANTHROPIC_VERSION,
   API_URL,
+  buildRequestBody,
   DEFAULT_COUNT,
   DEFAULT_MAX_USES,
   DEFAULT_PROVIDER,
-  FETCH_URL,
-  MAX_COUNT,
-  PROVIDER_PRESETS,
-  SEARCH_URL,
-  buildRequestBody,
   dedupeSources,
   extractAnswerAndSources,
+  FETCH_URL,
+  MAX_COUNT,
   mapNativeResults,
+  PROVIDER_PRESETS,
   resolveApiKey,
   resolveCount,
   resolveEndpoint,
@@ -26,6 +25,7 @@ import plugin, {
   resolveSearchApi,
   resolveSearchBaseUrl,
   resolveThinking,
+  SEARCH_URL,
   toContent,
   toResults,
   toSourceObjects,
@@ -48,7 +48,7 @@ const ENV_KEYS = [
 const savedEnv = {}
 const savedFetch = globalThis.fetch
 
-before(() => {
+beforeAll(() => {
   for (const key of ENV_KEYS) {
     savedEnv[key] = process.env[key]
     delete process.env[key]
@@ -59,7 +59,7 @@ beforeEach(() => {
   for (const key of ENV_KEYS) delete process.env[key]
 })
 
-after(() => {
+afterAll(() => {
   for (const key of ENV_KEYS) {
     if (savedEnv[key] === undefined) delete process.env[key]
     else process.env[key] = savedEnv[key]
@@ -158,7 +158,11 @@ test("extractAnswerAndSources tolerates hostile payloads and reads citation snip
 
   const { sources } = extractAnswerAndSources({
     content: [
-      { type: "text", text: "Answer.", citations: [{ url: "https://a", cited_text: "quoted text" }] },
+      {
+        type: "text",
+        text: "Answer.",
+        citations: [{ url: "https://a", cited_text: "quoted text" }],
+      },
       {
         type: "web_search_tool_result",
         content: [{ type: "web_search_result", url: "https://a", title: "A" }],
@@ -252,7 +256,11 @@ test("execute sends the API key, version header, and improvements", async () => 
       status: 200,
       json: async () => ({
         content: [
-          { type: "text", text: "The answer.", citations: [{ url: "https://a", cited_text: "snippet" }] },
+          {
+            type: "text",
+            text: "The answer.",
+            citations: [{ url: "https://a", cited_text: "snippet" }],
+          },
           {
             type: "web_search_tool_result",
             content: [
@@ -316,7 +324,10 @@ test("execute surfaces a non-2xx body", async () => {
     text: async () => "boom".repeat(200),
     json: async () => ({}),
   })
-  await assert.rejects(() => provider.execute({ query: "hi" }, {}), /Web search API error 500: boom/)
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, {}),
+    /Web search API error 500: boom/,
+  )
 })
 
 test("execute preserves an AbortError on a non-2xx body", async () => {
@@ -419,12 +430,18 @@ test("execute reuses the stored DeepSeek credential when no env key is set", asy
   const fake = {
     websearch: {
       async transform(callback) {
-        callback({ add(provider) { captured = provider }, default: { set() {} } })
+        callback({
+          add(provider) {
+            captured = provider
+          },
+          default: { set() {} },
+        })
       },
     },
     integration: {
       connection: {
-        active: async (id) => (id === "deepseek" ? { type: "credential", id: "cred_1" } : undefined),
+        active: async (id) =>
+          id === "deepseek" ? { type: "credential", id: "cred_1" } : undefined,
         resolve: async () => ({ type: "api", key: "sk-stored-key" }),
       },
     },
@@ -434,7 +451,7 @@ test("execute reuses the stored DeepSeek credential when no env key is set", asy
   delete process.env.WEBSEARCH_API_KEY
 
   let seen
-  globalThis.fetch = async (url, init) => {
+  globalThis.fetch = async (_url, init) => {
     seen = init
     return {
       ok: true,
@@ -454,7 +471,12 @@ test("environment key takes precedence over the stored credential", async () => 
   const fake = {
     websearch: {
       async transform(callback) {
-        callback({ add(provider) { captured = provider }, default: { set() {} } })
+        callback({
+          add(provider) {
+            captured = provider
+          },
+          default: { set() {} },
+        })
       },
     },
     integration: {
@@ -474,7 +496,7 @@ test("environment key takes precedence over the stored credential", async () => 
   process.env.DEEPSEEK_API_KEY = "sk-env"
 
   let seen
-  globalThis.fetch = async (url, init) => {
+  globalThis.fetch = async (_url, init) => {
     seen = init
     return {
       ok: true,
@@ -493,7 +515,12 @@ test("plugin options configure key, model, max_uses, and thinking", async () => 
   const fake = {
     websearch: {
       async transform(callback) {
-        callback({ add(provider) { captured = provider }, default: { set() {} } })
+        callback({
+          add(provider) {
+            captured = provider
+          },
+          default: { set() {} },
+        })
       },
     },
     options: { apiKey: "sk-option-key", model: "my-model", maxUses: 9, thinking: "disabled" },
@@ -505,7 +532,7 @@ test("plugin options configure key, model, max_uses, and thinking", async () => 
   delete process.env.WEBSEARCH_THINKING
 
   let seen
-  globalThis.fetch = async (url, init) => {
+  globalThis.fetch = async (_url, init) => {
     seen = init
     return {
       ok: true,
@@ -528,7 +555,12 @@ test("invalid options fall back to environment variables", async () => {
   const fake = {
     websearch: {
       async transform(callback) {
-        callback({ add(provider) { captured = provider }, default: { set() {} } })
+        callback({
+          add(provider) {
+            captured = provider
+          },
+          default: { set() {} },
+        })
       },
     },
     options: { model: "", maxUses: "abc", thinking: "garbage" },
@@ -540,7 +572,7 @@ test("invalid options fall back to environment variables", async () => {
   process.env.WEBSEARCH_THINKING = "disabled"
 
   let seen
-  globalThis.fetch = async (url, init) => {
+  globalThis.fetch = async (_url, init) => {
     seen = init
     return {
       ok: true,
@@ -615,7 +647,12 @@ test("execute surfaces a credential lookup failure instead of 'no key'", async (
   const fake = {
     websearch: {
       async transform(callback) {
-        callback({ add(provider) { captured = provider }, default: { set() {} } })
+        callback({
+          add(provider) {
+            captured = provider
+          },
+          default: { set() {} },
+        })
       },
     },
     integration: {
@@ -740,7 +777,12 @@ test("execute cancels while resolving the stored credential", async () => {
   const fake = {
     websearch: {
       async transform(callback) {
-        callback({ add(provider) { captured = provider }, default: { set() {} } })
+        callback({
+          add(provider) {
+            captured = provider
+          },
+          default: { set() {} },
+        })
       },
     },
     integration: {
@@ -764,7 +806,12 @@ test("execute does not leak a rejection when the credential lookup fails after a
   const fake = {
     websearch: {
       async transform(callback) {
-        callback({ add(provider) { captured = provider }, default: { set() {} } })
+        callback({
+          add(provider) {
+            captured = provider
+          },
+          default: { set() {} },
+        })
       },
     },
     integration: {
@@ -815,7 +862,10 @@ test("resolveEndpoint maps providers and honours baseUrl", () => {
   assert.equal(resolveEndpoint({ provider: "deepseek" }), API_URL)
   assert.equal(resolveEndpoint({}), API_URL)
   assert.equal(resolveEndpoint({ provider: "anthropic" }), "https://api.anthropic.com/v1/messages")
-  assert.equal(resolveEndpoint({ provider: "anthropic", baseUrl: "http://x/v1/messages" }), "http://x/v1/messages")
+  assert.equal(
+    resolveEndpoint({ provider: "anthropic", baseUrl: "http://x/v1/messages" }),
+    "http://x/v1/messages",
+  )
   assert.throws(() => resolveEndpoint({ provider: "custom" }), /baseUrl/)
 })
 
@@ -845,13 +895,21 @@ test("resolveModel prefers options, then env, then the provider preset", async (
 test("resolveModel uses the configured default only for the same provider", async () => {
   const same = {
     websearch: { transform() {} },
-    model: { async default() { return { data: { providerID: "deepseek", modelID: "deepseek-flash" } } } },
+    model: {
+      async default() {
+        return { data: { providerID: "deepseek", modelID: "deepseek-flash" } }
+      },
+    },
   }
   assert.equal(await resolveModel(same, {}), "deepseek-flash")
 
   const other = {
     websearch: { transform() {} },
-    model: { async default() { return { data: { providerID: "opencode", modelID: "exo-free" } } } },
+    model: {
+      async default() {
+        return { data: { providerID: "opencode", modelID: "exo-free" } }
+      },
+    },
   }
   assert.equal(await resolveModel(other, {}), "deepseek-v4-flash")
 })
@@ -860,10 +918,21 @@ test("setup registers the Code Mode tool", async () => {
   let namespaced
   const added = []
   const fake = {
-    websearch: { async transform(callback) { callback({ add() {}, default: { set() {} } }) } },
+    websearch: {
+      async transform(callback) {
+        callback({ add() {}, default: { set() {} } })
+      },
+    },
     tool: {
       async transform(callback) {
-        callback({ namespace(n) { namespaced = n }, add(t) { added.push(t) } })
+        callback({
+          namespace(n) {
+            namespaced = n
+          },
+          add(t) {
+            added.push(t)
+          },
+        })
       },
     },
   }
@@ -884,8 +953,21 @@ test("setup registers the Code Mode tool", async () => {
 test("Code Mode tool returns structured output and text content", async () => {
   let toolDef
   const fake = {
-    websearch: { async transform(callback) { callback({ add() {}, default: { set() {} } }) } },
-    tool: { async transform(callback) { callback({ namespace() {}, add(t) { toolDef = t } }) } },
+    websearch: {
+      async transform(callback) {
+        callback({ add() {}, default: { set() {} } })
+      },
+    },
+    tool: {
+      async transform(callback) {
+        callback({
+          namespace() {},
+          add(t) {
+            toolDef = t
+          },
+        })
+      },
+    },
   }
   await plugin.setup(fake)
   process.env.DEEPSEEK_API_KEY = "test-key"
@@ -915,7 +997,16 @@ test("Code Mode tool returns structured output and text content", async () => {
 test("setup works without the tool domain", async () => {
   let captured
   const fake = {
-    websearch: { async transform(callback) { callback({ add(p) { captured = p }, default: { set() {} } }) } },
+    websearch: {
+      async transform(callback) {
+        callback({
+          add(p) {
+            captured = p
+          },
+          default: { set() {} },
+        })
+      },
+    },
   }
   await plugin.setup(fake)
   assert.ok(captured)
@@ -936,8 +1027,21 @@ test("resolveEndpoint rejects a non-http baseUrl", () => {
 test("Code Mode tool normalises title for citation-only sources", async () => {
   let toolDef
   const fake = {
-    websearch: { async transform(callback) { callback({ add() {}, default: { set() {} } }) } },
-    tool: { async transform(callback) { callback({ namespace() {}, add(t) { toolDef = t } }) } },
+    websearch: {
+      async transform(callback) {
+        callback({ add() {}, default: { set() {} } })
+      },
+    },
+    tool: {
+      async transform(callback) {
+        callback({
+          namespace() {},
+          add(t) {
+            toolDef = t
+          },
+        })
+      },
+    },
   }
   await plugin.setup(fake)
   process.env.DEEPSEEK_API_KEY = "test-key"
@@ -958,8 +1062,21 @@ test("Code Mode tool normalises title for citation-only sources", async () => {
 test("Code Mode tool rejects an empty query", async () => {
   let toolDef
   const fake = {
-    websearch: { async transform(callback) { callback({ add() {}, default: { set() {} } }) } },
-    tool: { async transform(callback) { callback({ namespace() {}, add(t) { toolDef = t } }) } },
+    websearch: {
+      async transform(callback) {
+        callback({ add() {}, default: { set() {} } })
+      },
+    },
+    tool: {
+      async transform(callback) {
+        callback({
+          namespace() {},
+          add(t) {
+            toolDef = t
+          },
+        })
+      },
+    },
   }
   await plugin.setup(fake)
   process.env.DEEPSEEK_API_KEY = "test-key"
@@ -976,7 +1093,16 @@ test("search rejects an empty query on the provider path too", async () => {
 test("unknown provider without baseUrl fails before the model check", async () => {
   let captured
   const fake = {
-    websearch: { async transform(callback) { callback({ add(p) { captured = p }, default: { set() {} } }) } },
+    websearch: {
+      async transform(callback) {
+        callback({
+          add(p) {
+            captured = p
+          },
+          default: { set() {} },
+        })
+      },
+    },
     options: { provider: "custom-provider", apiKey: "k", model: "m" },
   }
   await plugin.setup(fake)
@@ -1010,12 +1136,18 @@ test("resolveSearchBaseUrl prefers the override and derives from baseUrl", () =>
     resolveSearchBaseUrl({ baseUrl: "https://api.deepseek.com/anthropic/v1/messages" }),
     "https://api.deepseek.com",
   )
-  assert.equal(resolveSearchBaseUrl({ baseUrl: "https://example.com/v1/messages" }), "https://example.com")
+  assert.equal(
+    resolveSearchBaseUrl({ baseUrl: "https://example.com/v1/messages" }),
+    "https://example.com",
+  )
   assert.equal(
     resolveSearchBaseUrl({ baseUrl: "https://gw.example/proxy/v1/messages" }),
     "https://gw.example/proxy",
   )
-  assert.equal(resolveSearchBaseUrl({ searchBaseUrl: "https://search.example.com/" }), "https://search.example.com")
+  assert.equal(
+    resolveSearchBaseUrl({ searchBaseUrl: "https://search.example.com/" }),
+    "https://search.example.com",
+  )
   assert.equal(
     resolveSearchBaseUrl({ searchBaseUrl: "https://search.example.com/api/" }),
     "https://search.example.com/api",
@@ -1023,11 +1155,20 @@ test("resolveSearchBaseUrl prefers the override and derives from baseUrl", () =>
   process.env.WEBSEARCH_SEARCH_BASE_URL = "https://env.example.com"
   assert.equal(resolveSearchBaseUrl({}), "https://env.example.com")
   delete process.env.WEBSEARCH_SEARCH_BASE_URL
-  assert.throws(() => resolveSearchBaseUrl({ provider: "anthropic" }), /requires the deepseek provider/)
-  assert.throws(() => resolveSearchBaseUrl({ baseUrl: "https://api.deepseek.com/v1" }), /cannot derive/)
+  assert.throws(
+    () => resolveSearchBaseUrl({ provider: "anthropic" }),
+    /requires the deepseek provider/,
+  )
+  assert.throws(
+    () => resolveSearchBaseUrl({ baseUrl: "https://api.deepseek.com/v1" }),
+    /cannot derive/,
+  )
   assert.throws(() => resolveSearchBaseUrl({ searchBaseUrl: "ftp://x" }), /Invalid searchBaseUrl/)
   assert.throws(() => resolveSearchBaseUrl({ searchBaseUrl: "https://" }), /Invalid searchBaseUrl/)
-  assert.throws(() => resolveSearchBaseUrl({ searchBaseUrl: "https:///v1" }), /Invalid searchBaseUrl/)
+  assert.throws(
+    () => resolveSearchBaseUrl({ searchBaseUrl: "https:///v1" }),
+    /Invalid searchBaseUrl/,
+  )
   for (const value of [
     "https://user:topsecret@host/x",
     "https:/user:topsecret@host/x",
@@ -1048,9 +1189,7 @@ test("resolveSearchBaseUrl prefers the override and derives from baseUrl", () =>
   assert.throws(
     () => resolveSearchBaseUrl({ searchBaseUrl: "https://user:pa@ss@host/x" }),
     (error) =>
-      error instanceof Error &&
-      !error.message.includes("pa@ss") &&
-      !error.message.includes("@ss"),
+      error instanceof Error && !error.message.includes("pa@ss") && !error.message.includes("@ss"),
   )
   assert.throws(
     () => resolveSearchBaseUrl({ searchBaseUrl: "https://x.example/v1" }),
@@ -1061,7 +1200,8 @@ test("resolveSearchBaseUrl prefers the override and derives from baseUrl", () =>
     /without \/v1/,
   )
   assert.throws(
-    () => resolveSearchBaseUrl({ searchBaseUrl: "https://gw.example/v1/messages?api_key=SECRET123" }),
+    () =>
+      resolveSearchBaseUrl({ searchBaseUrl: "https://gw.example/v1/messages?api_key=SECRET123" }),
     (error) => error instanceof Error && !error.message.includes("SECRET123"),
   )
   assert.throws(() => resolveSearchBaseUrl({ baseUrl: "ftp://x" }), /Invalid baseUrl/)
@@ -1203,7 +1343,10 @@ test("native search fetches full Markdown for the top N results", async () => {
 
   const fetches = fetchCalls.filter((call) => call.url === FETCH_URL)
   assert.equal(fetches.length, 2)
-  assert.deepEqual(fetches.map((call) => call.body), [{ url: "https://a" }, { url: "https://b" }])
+  assert.deepEqual(
+    fetches.map((call) => call.body),
+    [{ url: "https://a" }, { url: "https://b" }],
+  )
   assert.equal(results[0].content, "# Full\nhttps://a")
   assert.equal(results[1].title, "Full https://b")
   assert.equal(results[2].content, "sum c")
@@ -1257,7 +1400,10 @@ test("native search honours an already-aborted signal", async () => {
     calls++
     throw new Error("must not be called")
   }
-  await assert.rejects(() => provider.execute({ query: "hi" }, { signal: controller.signal }), /stop now/)
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, { signal: controller.signal }),
+    /stop now/,
+  )
   assert.equal(calls, 0)
 })
 
@@ -1271,7 +1417,11 @@ test("native mode skips model resolution at setup", async () => {
         throw new Error("should not be called")
       },
     },
-    websearch: { async transform(callback) { callback({ add() {}, default: { set() {} } }) } },
+    websearch: {
+      async transform(callback) {
+        callback({ add() {}, default: { set() {} } })
+      },
+    },
   }
   await plugin.setup(fake)
   assert.equal(modelCalls, 0)
@@ -1280,7 +1430,11 @@ test("native mode skips model resolution at setup", async () => {
 test("native mode validates its configuration at setup", async () => {
   const fake = (options) => ({
     options,
-    websearch: { async transform() { throw new Error("must not be reached") } },
+    websearch: {
+      async transform() {
+        throw new Error("must not be reached")
+      },
+    },
   })
   await assert.rejects(() => plugin.setup(fake({ searchApi: "bogus" })), /Invalid searchApi/)
   await assert.rejects(
@@ -1293,8 +1447,21 @@ test("Code Mode tool returns native results with an empty answer", async () => {
   let toolDef
   const fake = {
     options: { searchApi: "native", apiKey: "k", count: 2 },
-    websearch: { async transform(callback) { callback({ add() {}, default: { set() {} } }) } },
-    tool: { async transform(callback) { callback({ namespace() {}, add(tool) { toolDef = tool } }) } },
+    websearch: {
+      async transform(callback) {
+        callback({ add() {}, default: { set() {} } })
+      },
+    },
+    tool: {
+      async transform(callback) {
+        callback({
+          namespace() {},
+          add(tool) {
+            toolDef = tool
+          },
+        })
+      },
+    },
   }
   await plugin.setup(fake)
 
@@ -1359,11 +1526,11 @@ test("native search trims padding without rejecting a short query", async () => 
     return { ok: true, status: 200, text: async () => "", json: async () => ({ results: [] }) }
   }
   for (const padding of [300, 1148, 1200]) {
-    await provider.execute({ query: " ".repeat(padding) + "hello" }, {})
+    await provider.execute({ query: `${" ".repeat(padding)}hello` }, {})
     assert.equal(body.query, "hello")
   }
   for (const padding of [127, 128, 200, 255, 256]) {
-    await provider.execute({ query: " ".repeat(padding) + "hi" + " ".repeat(padding) }, {})
+    await provider.execute({ query: `${" ".repeat(padding)}hi${" ".repeat(padding)}` }, {})
     assert.equal(body.query, "hi")
   }
 })
@@ -1435,7 +1602,12 @@ test("fetch enrichment spaces request starts to respect 5 QPS", async () => {
         }),
       }
     }
-    return { ok: true, status: 200, text: async () => "", json: async () => ({ title: "T", content: "C" }) }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => "",
+      json: async () => ({ title: "T", content: "C" }),
+    }
   }
 
   await provider.execute({ query: "hi" }, {})
@@ -1457,7 +1629,12 @@ test("request pacing is shared by concurrent calls", async () => {
         json: async () => ({ results: [{ url: "https://a", summary: "a" }] }),
       }
     }
-    return { ok: true, status: 200, text: async () => "", json: async () => ({ title: "T", content: "C" }) }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => "",
+      json: async () => ({ title: "T", content: "C" }),
+    }
   }
 
   await Promise.all([
@@ -1477,7 +1654,10 @@ test("request pacing is shared by concurrent calls", async () => {
     )
   }
   for (let index = 1; index < fetchStarts.length; index++) {
-    assert.ok(fetchStarts[index] - fetchStarts[index - 1] >= 205, "concurrent fetches must be paced")
+    assert.ok(
+      fetchStarts[index] - fetchStarts[index - 1] >= 205,
+      "concurrent fetches must be paced",
+    )
   }
 })
 
@@ -1499,8 +1679,21 @@ test("Code Mode tool reports an empty native result set", async () => {
   let toolDef
   const fake = {
     options: { searchApi: "native", apiKey: "k" },
-    websearch: { async transform(callback) { callback({ add() {}, default: { set() {} } }) } },
-    tool: { async transform(callback) { callback({ namespace() {}, add(tool) { toolDef = tool } }) } },
+    websearch: {
+      async transform(callback) {
+        callback({ add() {}, default: { set() {} } })
+      },
+    },
+    tool: {
+      async transform(callback) {
+        callback({
+          namespace() {},
+          add(tool) {
+            toolDef = tool
+          },
+        })
+      },
+    },
   }
   await plugin.setup(fake)
 
@@ -1525,12 +1718,20 @@ test("messages mode sends nothing for an already-aborted signal", async () => {
     calls++
     throw new Error("must not be called")
   }
-  await assert.rejects(() => provider.execute({ query: "hi" }, { signal: controller.signal }), /pre-abort/)
+  await assert.rejects(
+    () => provider.execute({ query: "hi" }, { signal: controller.signal }),
+    /pre-abort/,
+  )
   assert.equal(calls, 0)
 })
 
 test("native fetch failures produce one warning without the key", async () => {
-  const provider = await registerWith({ searchApi: "native", apiKey: "secret-key", count: 3, fetch: 3 })
+  const provider = await registerWith({
+    searchApi: "native",
+    apiKey: "secret-key",
+    count: 3,
+    fetch: 3,
+  })
   const warnings = []
   const originalWarn = console.warn
   console.warn = (...args) => warnings.push(args.join(" "))
@@ -1589,7 +1790,12 @@ test("aborting during the fetch pacing delay stops the run", async () => {
       firstFetchAt = Date.now()
       setTimeout(() => controller.abort(new Error("gap-abort")), 50)
     }
-    return { ok: true, status: 200, text: async () => "", json: async () => ({ title: "T", content: "C" }) }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => "",
+      json: async () => ({ title: "T", content: "C" }),
+    }
   }
 
   try {
@@ -1696,7 +1902,16 @@ test("pre-abort wins before the credential lookup", async () => {
         },
       },
     },
-    websearch: { async transform(callback) { callback({ add(provider) { captured = provider }, default: { set() {} } }) } },
+    websearch: {
+      async transform(callback) {
+        callback({
+          add(provider) {
+            captured = provider
+          },
+          default: { set() {} },
+        })
+      },
+    },
   })
 
   await assert.rejects(
@@ -1716,7 +1931,12 @@ test("aborting a queued caller rejects without waiting for its slot", async () =
       bodies.push(JSON.parse(init.body).query)
       return { ok: true, status: 200, text: async () => "", json: async () => ({ results: [] }) }
     }
-    return { ok: true, status: 200, text: async () => "", json: async () => ({ title: "T", content: "C" }) }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => "",
+      json: async () => ({ title: "T", content: "C" }),
+    }
   }
 
   const first = provider.execute({ query: "first" }, {})
@@ -1758,7 +1978,10 @@ test("native search rejects an oversized query", async () => {
 
 test("exporters drop non-http source URLs", () => {
   const sources = [{ url: "javascript:alert(1)" }, { url: "https://ok.example/x", title: "OK" }]
-  assert.deepEqual(toResults("", sources).map((result) => result.url), ["https://ok.example/x"])
+  assert.deepEqual(
+    toResults("", sources).map((result) => result.url),
+    ["https://ok.example/x"],
+  )
   assert.doesNotMatch(toContent("", sources), /javascript/)
   assert.deepEqual(toSourceObjects(sources), [
     { url: "https://ok.example/x", title: "OK", content: "" },
@@ -1827,13 +2050,25 @@ test("pre-abort skips the lazy model lookup", async () => {
         return { providerID: "other", modelID: "x" }
       },
     },
-    websearch: { async transform(callback) { callback({ add(provider) { captured = provider }, default: { set() {} } }) } },
+    websearch: {
+      async transform(callback) {
+        callback({
+          add(provider) {
+            captured = provider
+          },
+          default: { set() {} },
+        })
+      },
+    },
   })
   const afterSetup = modelCalls
   const controller = new AbortController()
   controller.abort(new Error("pre-model"))
   const started = Date.now()
-  await assert.rejects(() => captured.execute({ query: "hi" }, { signal: controller.signal }), /pre-model/)
+  await assert.rejects(
+    () => captured.execute({ query: "hi" }, { signal: controller.signal }),
+    /pre-model/,
+  )
   assert.ok(Date.now() - started < 50)
   assert.equal(modelCalls, afterSetup)
 })
@@ -1882,8 +2117,21 @@ test("tool pre-abort skips the lazy model lookup", async () => {
         return { providerID: "other", modelID: "x" }
       },
     },
-    websearch: { async transform(callback) { callback({ add() {}, default: { set() {} } }) } },
-    tool: { async transform(callback) { callback({ namespace() {}, add(tool) { toolDef = tool } }) } },
+    websearch: {
+      async transform(callback) {
+        callback({ add() {}, default: { set() {} } })
+      },
+    },
+    tool: {
+      async transform(callback) {
+        callback({
+          namespace() {},
+          add(tool) {
+            toolDef = tool
+          },
+        })
+      },
+    },
   })
   const afterSetup = modelCalls
   const controller = new AbortController()
@@ -1913,19 +2161,13 @@ test("messages rejects a query above the backend cap", async () => {
   }
   await assert.rejects(() => provider.execute({ query: "a".repeat(8193) }, {}), /at most 8192/)
   assert.equal(calls, 0)
-  await assert.rejects(
-    () => provider.execute({ query: "😀".repeat(8193) }, {}),
-    /at most 8192/,
-  )
-  await assert.rejects(
-    () => provider.execute({ query: "a".repeat(1_000_001) }, {}),
-    /too long/,
-  )
+  await assert.rejects(() => provider.execute({ query: "😀".repeat(8193) }, {}), /at most 8192/)
+  await assert.rejects(() => provider.execute({ query: "a".repeat(1_000_001) }, {}), /too long/)
   assert.equal(calls, 0)
 
   globalThis.fetch = ok
   await provider.execute({ query: "a".repeat(8192) }, {})
-  await provider.execute({ query: " ".repeat(8193) + "hi" }, {})
+  await provider.execute({ query: `${" ".repeat(8193)}hi` }, {})
   await provider.execute({ query: "😀".repeat(4097) }, {})
 })
 
@@ -1958,7 +2200,16 @@ test("a timed-out model lookup does not block and recovers in the background", a
         return { providerID: "deepseek", modelID: "recovered" }
       },
     },
-    websearch: { async transform(callback) { callback({ add(provider) { captured = provider }, default: { set() {} } }) } },
+    websearch: {
+      async transform(callback) {
+        callback({
+          add(provider) {
+            captured = provider
+          },
+          default: { set() {} },
+        })
+      },
+    },
   })
   let body
   globalThis.fetch = async (_url, init) => {
@@ -2017,7 +2268,7 @@ test("API error messages are truncated to 300 characters", async () => {
 })
 
 test("configuration errors do not echo provider values", async () => {
-  const secret = "sk-live-" + "S".repeat(200)
+  const secret = `sk-live-${"S".repeat(200)}`
   assert.throws(
     () => resolveEndpoint({ provider: secret }),
     (error) => error instanceof Error && !error.message.includes(secret),
@@ -2025,7 +2276,16 @@ test("configuration errors do not echo provider values", async () => {
   let captured
   await plugin.setup({
     options: { provider: secret, baseUrl: "https://h/v1/messages" },
-    websearch: { async transform(callback) { callback({ add(provider) { captured = provider }, default: { set() {} } }) } },
+    websearch: {
+      async transform(callback) {
+        callback({
+          add(provider) {
+            captured = provider
+          },
+          default: { set() {} },
+        })
+      },
+    },
   })
   await assert.rejects(
     () => captured.execute({ query: "hi" }, {}),
@@ -2038,7 +2298,10 @@ test("messages surfaces a web search tool error", async () => {
   process.env.DEEPSEEK_API_KEY = "test-key"
   const cases = [
     [
-      { type: "web_search_tool_result", content: { type: "web_search_tool_result_error", error_code: "max_uses_exceeded" } },
+      {
+        type: "web_search_tool_result",
+        content: { type: "web_search_tool_result_error", error_code: "max_uses_exceeded" },
+      },
       /max_uses_exceeded/,
     ],
     [
@@ -2046,11 +2309,17 @@ test("messages surfaces a web search tool error", async () => {
       /web_search_tool_result_error/,
     ],
     [
-      { type: "web_search_tool_result", content: { type: "web_search_tool_result_error", error_code: "   " } },
+      {
+        type: "web_search_tool_result",
+        content: { type: "web_search_tool_result_error", error_code: "   " },
+      },
       /web_search_tool_result_error/,
     ],
     [
-      { type: "web_search_tool_result", content: [{ type: "web_search_tool_result_error", error_code: "unavailable" }] },
+      {
+        type: "web_search_tool_result",
+        content: [{ type: "web_search_tool_result_error", error_code: "unavailable" }],
+      },
       /unavailable/,
     ],
     [
@@ -2094,8 +2363,21 @@ test("tool schema advertises the backend query limit", async () => {
   let toolDef
   const fake = (options) => ({
     options,
-    websearch: { async transform(callback) { callback({ add() {}, default: { set() {} } }) } },
-    tool: { async transform(callback) { callback({ namespace() {}, add(tool) { toolDef = tool } }) } },
+    websearch: {
+      async transform(callback) {
+        callback({ add() {}, default: { set() {} } })
+      },
+    },
+    tool: {
+      async transform(callback) {
+        callback({
+          namespace() {},
+          add(tool) {
+            toolDef = tool
+          },
+        })
+      },
+    },
   })
 
   await plugin.setup(fake({ searchApi: "native", apiKey: "k" }))
@@ -2111,7 +2393,16 @@ test("unknown provider gets a neutral display name", async () => {
   let captured
   await plugin.setup({
     options: { provider: "custom-x", baseUrl: "https://h/v1/messages", apiKey: "k" },
-    websearch: { async transform(callback) { callback({ add(provider) { captured = provider }, default: { set() {} } }) } },
+    websearch: {
+      async transform(callback) {
+        callback({
+          add(provider) {
+            captured = provider
+          },
+          default: { set() {} },
+        })
+      },
+    },
   })
   assert.equal(captured.name, "Web Search")
   assert.doesNotMatch(captured.name, /custom-x/)
@@ -2204,7 +2495,7 @@ test("200 error messages are sanitized on both backends", async () => {
 test("tool error codes are truncated by code points and well-formed", async () => {
   const provider = await register()
   process.env.DEEPSEEK_API_KEY = "test-key"
-  for (const code of ["𝕏".repeat(500), "a".repeat(299) + "\uD800" + "b"]) {
+  for (const code of ["𝕏".repeat(500), `${"a".repeat(299)}\uD800b`]) {
     globalThis.fetch = async () => ({
       ok: true,
       status: 200,
@@ -2246,8 +2537,7 @@ test("large error bodies are streamed and capped", async () => {
   globalThis.fetch = async () => new Response("E".repeat(100_000), { status: 500 })
   await assert.rejects(
     () => provider.execute({ query: "hi" }, {}),
-    (error) =>
-      error instanceof Error && error.message.length <= 330 && /E{10}/.test(error.message),
+    (error) => error instanceof Error && error.message.length <= 330 && /E{10}/.test(error.message),
   )
 })
 
@@ -2318,8 +2608,21 @@ test("tool registration failure is logged and setup still succeeds", async () =>
   console.warn = (...args) => warnings.push(args.join(" "))
   try {
     await plugin.setup({
-      websearch: { async transform(callback) { callback({ add(provider) { captured = provider }, default: { set() {} } }) } },
-      tool: { async transform() { throw new Error("tool-domain-boom") } },
+      websearch: {
+        async transform(callback) {
+          callback({
+            add(provider) {
+              captured = provider
+            },
+            default: { set() {} },
+          })
+        },
+      },
+      tool: {
+        async transform() {
+          throw new Error("tool-domain-boom")
+        },
+      },
     })
   } finally {
     console.warn = original
@@ -2346,7 +2649,7 @@ test("a single oversized chunk keeps its prefix", async () => {
   process.env.DEEPSEEK_API_KEY = "test-key"
   const stream = new ReadableStream({
     start(controller) {
-      controller.enqueue(new TextEncoder().encode("PREFIX-" + "E".repeat(100_000)))
+      controller.enqueue(new TextEncoder().encode(`PREFIX-${"E".repeat(100_000)}`))
       controller.close()
     },
   })
@@ -2387,7 +2690,7 @@ test("a non-resolving cancel does not hang the call", async () => {
   process.env.DEEPSEEK_API_KEY = "test-key"
   const stream = new ReadableStream({
     start(controller) {
-      controller.enqueue(new TextEncoder().encode("PREFIX-" + "E".repeat(100_000)))
+      controller.enqueue(new TextEncoder().encode(`PREFIX-${"E".repeat(100_000)}`))
     },
     cancel() {
       return new Promise(() => {})
@@ -2533,7 +2836,16 @@ test("a slow model is awaited on the first search without a preset", async () =>
         return { providerID: "anthropic", modelID: "claude-warm" }
       },
     },
-    websearch: { async transform(callback) { callback({ add(provider) { captured = provider }, default: { set() {} } }) } },
+    websearch: {
+      async transform(callback) {
+        callback({
+          add(provider) {
+            captured = provider
+          },
+          default: { set() {} },
+        })
+      },
+    },
   })
   let body
   globalThis.fetch = async (_url, init) => {
@@ -2556,7 +2868,16 @@ test("a late model lookup is picked up after the refresh window", async () => {
         return { providerID: "deepseek", modelID: "late" }
       },
     },
-    websearch: { async transform(callback) { callback({ add(provider) { captured = provider }, default: { set() {} } }) } },
+    websearch: {
+      async transform(callback) {
+        callback({
+          add(provider) {
+            captured = provider
+          },
+          default: { set() {} },
+        })
+      },
+    },
   })
   let body
   globalThis.fetch = async (_url, init) => {

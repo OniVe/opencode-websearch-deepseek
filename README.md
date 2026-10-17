@@ -28,7 +28,8 @@ supports tools.
 - **OpenCode 2.x** with the V2 plugin API (the `plugins` config field). The
   OpenCode 1.x plugin loader expects the legacy `server()` export and will not
   load this plugin.
-- Node.js 22.14+ (for `fetch`; OpenCode's runtime already provides it).
+- Node.js 22.14+ at runtime (OpenCode's runtime already provides it).
+- Bun 1.4+ for development (`bun install`, tests, Biome).
 - An API key for the selected provider (DeepSeek by default), or that provider
   authenticated in OpenCode (`opencode auth login`).
 
@@ -258,10 +259,12 @@ then tags the commit and creates a GitHub Release. See
 ## Development
 
 ```sh
-npm install
-npm run typecheck   # tsc --noEmit
-npm run build       # emits dist/
-npm test            # builds, then runs node --test
+bun install
+bun run typecheck   # tsc --noEmit
+bun run build       # emits dist/
+bun run test        # builds, then runs bun test
+bun run lint        # biome check
+bun run format      # biome format --write
 ```
 
 The plugin is a thin wrapper: pure helpers (`buildRequestBody`, `dedupeSources`,
@@ -276,10 +279,10 @@ are exported separately and covered by unit tests with a mocked `fetch`.
 Build a tarball and install it into a scratch config:
 
 ```sh
-npm pack
+bun pm pack
 mkdir scratch && cd scratch
-npm init -y
-npm install ../opencode-websearch-deepseek-*.tgz
+bun init -y
+bun add ../opencode-websearch-deepseek-*.tgz
 ```
 
 Then point `opencode.jsonc` in that directory at the package and restart

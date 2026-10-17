@@ -42,10 +42,12 @@ owns them. Release notes are the source of truth and live on
 ## Local development
 
 ```sh
-npm ci
-npm run typecheck
-npm test          # builds, then runs node --test
-npm run build
+bun install
+bun run typecheck
+bun run test      # builds, then runs bun test
+bun run lint      # biome check
+bun run build
 ```
 
-Requires Node.js 22.14+ (the release tooling in `devDependencies` needs it).
+Requires Bun 1.4+ and Node.js 22.14+ (the release tooling in `devDependencies`
+needs Node/npm for trusted publishing).

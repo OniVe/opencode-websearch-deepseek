@@ -107,7 +107,7 @@ export const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
 
 /** Look up a preset by own key only (never the prototype chain). */
 function getPreset(provider: string): ProviderPreset | undefined {
-  return Object.prototype.hasOwnProperty.call(PROVIDER_PRESETS, provider)
+  return Object.hasOwn(PROVIDER_PRESETS, provider)
     ? (PROVIDER_PRESETS[provider] as ProviderPreset)
     : undefined
 }
@@ -378,7 +378,9 @@ export function resolveSearchBaseUrl(options?: WebsearchOptions): string {
   }
 
   if (resolveProvider(options) === DEFAULT_PROVIDER) return NATIVE_BASE_URL
-  throw new Error('searchApi "native" requires the deepseek provider or the searchBaseUrl plugin option')
+  throw new Error(
+    'searchApi "native" requires the deepseek provider or the searchBaseUrl plugin option',
+  )
 }
 
 /** Parse an integer in `[min, max]` from a number or a plain-integer string. */
@@ -443,7 +445,7 @@ function providerDisplay(provider: string): string {
 /** Read an environment variable, treating blank strings as unset. */
 function readEnv(name: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
   const value = env[name]
-  return value && value.trim() ? value.trim() : undefined
+  return value?.trim() ? value.trim() : undefined
 }
 
 /** Safe provider label for error messages: known presets only. */
@@ -484,7 +486,9 @@ export async function resolveApiKey(
   } catch (error) {
     if (signal?.aborted) throwCancellation(signal, error)
     // A genuine integration failure is not "no key": surface it with context.
-    throw new Error(`Failed to read the ${providerLabel(integrationID)} credential from OpenCode`, { cause: error })
+    throw new Error(`Failed to read the ${providerLabel(integrationID)} credential from OpenCode`, {
+      cause: error,
+    })
   }
 }
 
@@ -506,9 +510,8 @@ export async function resolveModel(
   const provider = resolveProvider(options)
   try {
     const result = await ctx.model?.default?.()
-    const info = ((result as { data?: ModelInfo } | undefined)?.data ?? (result as ModelInfo | undefined)) as
-      | ModelInfo
-      | undefined
+    const info = ((result as { data?: ModelInfo } | undefined)?.data ??
+      (result as ModelInfo | undefined)) as ModelInfo | undefined
     if (info && info.providerID === provider) {
       const id = readString(info.modelID) ?? readString(info.id)
       if (id) return id
@@ -672,7 +675,9 @@ function pickMaxUses(value: unknown): number | undefined {
  * Resolve the `max_uses` value for the search tool declaration.
  * Falls back to {@link DEFAULT_MAX_USES} for missing or invalid input.
  */
-export function resolveMaxUses(raw: string | number | undefined = process.env.WEBSEARCH_MAX_USES): number {
+export function resolveMaxUses(
+  raw: string | number | undefined = process.env.WEBSEARCH_MAX_USES,
+): number {
   return pickMaxUses(raw) ?? DEFAULT_MAX_USES
 }
 
@@ -683,10 +688,20 @@ export function resolveMaxUses(raw: string | number | undefined = process.env.WE
 function pickThinking(value: unknown): "enabled" | "disabled" | undefined {
   if (typeof value !== "string") return undefined
   const normalized = value.trim().toLowerCase()
-  if (normalized === "enabled" || normalized === "on" || normalized === "true" || normalized === "1") {
+  if (
+    normalized === "enabled" ||
+    normalized === "on" ||
+    normalized === "true" ||
+    normalized === "1"
+  ) {
     return "enabled"
   }
-  if (normalized === "disabled" || normalized === "off" || normalized === "false" || normalized === "0") {
+  if (
+    normalized === "disabled" ||
+    normalized === "off" ||
+    normalized === "false" ||
+    normalized === "0"
+  ) {
     return "disabled"
   }
   return undefined
@@ -703,7 +718,10 @@ export function resolveThinking(
 }
 
 /** Build the JSON request body sent to the Messages endpoint. */
-export function buildRequestBody(query: string, options: BuildRequestOptions): Record<string, unknown> {
+export function buildRequestBody(
+  query: string,
+  options: BuildRequestOptions,
+): Record<string, unknown> {
   const tool: Record<string, unknown> = {
     type: WEB_SEARCH_TOOL_TYPE,
     name: "web_search",
@@ -859,7 +877,10 @@ export function extractAnswerAndSources(data: DeepSeekResponse): {
  * Build the result list OpenCode expects: the synthesized answer first (when
  * present), followed by the individual sources.
  */
-export function toResults(answer: string, sources: readonly DeepSeekSource[] = []): WebSearchResult[] {
+export function toResults(
+  answer: string,
+  sources: readonly DeepSeekSource[] = [],
+): WebSearchResult[] {
   const valid = (Array.isArray(sources) ? sources : []).filter(
     (source): source is DeepSeekSource =>
       typeof source?.url === "string" && isHttpSourceUrl(source.url),
@@ -915,7 +936,11 @@ export function toSourceObjects(
       (source): source is DeepSeekSource =>
         typeof source?.url === "string" && isHttpSourceUrl(source.url),
     )
-    .map((source) => ({ url: source.url, title: source.title || source.url, content: source.content ?? "" }))
+    .map((source) => ({
+      url: source.url,
+      title: source.title || source.url,
+      content: source.content ?? "",
+    }))
 }
 
 /** Read and validate the API key, with a provider-specific error. */
@@ -1065,12 +1090,14 @@ async function postNativeTool(
   )
 
   if (!response.ok) {
-    const text = await readTextLimited(response, MAX_ERROR_BYTES, signal).catch((error: unknown) => {
-      if (signal?.aborted) return throwCancellation(signal, error)
-      if ((error as { name?: string } | undefined)?.name === "AbortError") throw error
-      const detail = error instanceof Error ? error.message : String(error)
-      return `[body read failed: ${detail}]`
-    })
+    const text = await readTextLimited(response, MAX_ERROR_BYTES, signal).catch(
+      (error: unknown) => {
+        if (signal?.aborted) return throwCancellation(signal, error)
+        if ((error as { name?: string } | undefined)?.name === "AbortError") throw error
+        const detail = error instanceof Error ? error.message : String(error)
+        return `[body read failed: ${detail}]`
+      },
+    )
     if (signal?.aborted) throwCancellation(signal, undefined)
     throw new Error(
       `Web search API error ${response.status}: ${remoteMessage(extractErrorMessage(text), "unknown error")}`,
@@ -1147,7 +1174,8 @@ async function nativeSearch(
   }
   const { apiKey } = await requireApiKey(ctx, options, signal)
   const baseUrl = resolveSearchBaseUrl(options)
-  const count = pickIntegerInRange(options.count, 1, MAX_COUNT) ?? resolveCount(readEnv("WEBSEARCH_COUNT"))
+  const count =
+    pickIntegerInRange(options.count, 1, MAX_COUNT) ?? resolveCount(readEnv("WEBSEARCH_COUNT"))
   const needContent =
     pickBoolean(options.needContent) ?? resolveNeedContent(readEnv("WEBSEARCH_NEED_CONTENT"))
   const fetchCount =
@@ -1192,7 +1220,11 @@ export async function searchDeepSeek(
 ): Promise<{ answer: string; sources: DeepSeekSource[] }> {
   const provider = resolveProvider(options)
   // Reject absurd raw input before any linear work.
-  if (searchApi !== "native" && typeof query === "string" && query.length > MAX_RAW_MESSAGE_QUERY_LENGTH) {
+  if (
+    searchApi !== "native" &&
+    typeof query === "string" &&
+    query.length > MAX_RAW_MESSAGE_QUERY_LENGTH
+  ) {
     throw new Error("query is too long")
   }
   const trimmedQuery = typeof query === "string" ? query.trim() : ""
@@ -1242,13 +1274,15 @@ export async function searchDeepSeek(
     )
 
     if (!response.ok) {
-      const text = await readTextLimited(response, MAX_ERROR_BYTES, signal).catch((error: unknown) => {
-        // Preserve cancellation: never turn an abort into an API error.
-        if (signal?.aborted) return throwCancellation(signal, error)
-        if ((error as { name?: string } | undefined)?.name === "AbortError") throw error
-        const detail = error instanceof Error ? error.message : String(error)
-        return `[body read failed: ${detail}]`
-      })
+      const text = await readTextLimited(response, MAX_ERROR_BYTES, signal).catch(
+        (error: unknown) => {
+          // Preserve cancellation: never turn an abort into an API error.
+          if (signal?.aborted) return throwCancellation(signal, error)
+          if ((error as { name?: string } | undefined)?.name === "AbortError") throw error
+          const detail = error instanceof Error ? error.message : String(error)
+          return `[body read failed: ${detail}]`
+        },
+      )
       // An abort can also arrive after the body resolves; re-check so it is
       // not masked as an API error.
       if (signal?.aborted) throwCancellation(signal, undefined)
@@ -1380,9 +1414,7 @@ export const plugin = {
                   minLength: 1,
                   maxLength: searchApi === "native" ? 128 : MAX_MESSAGE_QUERY_LENGTH,
                   description:
-                    searchApi === "native"
-                      ? "Search query (up to 128 characters)"
-                      : "Search query",
+                    searchApi === "native" ? "Search query (up to 128 characters)" : "Search query",
                 },
               },
               required: ["query"],
@@ -1407,7 +1439,12 @@ export const plugin = {
               },
               required: ["answer", "sources"],
             },
-            options: { namespace: "websearch", codemode: true, pinned: true, permission: "websearch" },
+            options: {
+              namespace: "websearch",
+              codemode: true,
+              pinned: true,
+              permission: "websearch",
+            },
             execute: async (input: { query?: unknown }, context: { signal?: AbortSignal }) => {
               const query = typeof input?.query === "string" ? input.query : ""
               if (context?.signal?.aborted) throwCancellation(context.signal, undefined)

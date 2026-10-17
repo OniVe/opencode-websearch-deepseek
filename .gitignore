@@ -1,5 +1,7 @@
 node_modules/
 dist/
+coverage/
+bun.lockb
 *.tgz
 *.log
 .DS_Store
