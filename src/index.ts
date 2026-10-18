@@ -1,19 +1,21 @@
 /**
  * opencode-websearch-deepseek
  *
- * A web search provider for OpenCode's built-in `websearch` tool, speaking the
- * Anthropic Messages protocol with the server-side `web_search_20250305` tool.
+ * A web search provider for OpenCode's built-in `websearch` tool with two
+ * backends: the native DeepSeek Search & Fetch APIs (default for DeepSeek) and
+ * the Anthropic Messages protocol with the server-side `web_search_20250305`
+ * tool (backward compatibility and non-DeepSeek providers).
  * It registers through the OpenCode V2 plugin API (`ctx.websearch.transform`)
  * — no MCP server required — and additionally exposes the same search to Code
  * Mode as the `tools.websearch.search(...)` tool when the runtime supports it.
  *
- * DeepSeek is the default provider (its Anthropic-compatible endpoint emulates
- * the same protocol); any Anthropic-compatible endpoint can be selected.
+ * DeepSeek is the default provider. `searchApi` defaults to `native` for
+ * DeepSeek unless a custom `baseUrl` is set, and for any provider when
+ * `searchBaseUrl` is set; use `searchApi: "messages"` for the synthesized
+ * answer backend.
  *
- * DeepSeek also exposes native JSON Search & Fetch APIs. Set
- * `searchApi: "native"` to use them instead of the Messages tool: the search
- * returns structured results, and the top results can be enriched with full
- * page Markdown through the Fetch API.
+ * The native APIs return structured results, and the top results can be
+ * enriched with full page Markdown through the Fetch API.
  *
  * Environment:
  *   DEEPSEEK_API_KEY        DeepSeek API key (default provider).
@@ -22,7 +24,7 @@
  *   WEBSEARCH_MODEL         Model override.
  *   WEBSEARCH_MAX_USES      Max server-side searches per query, defaults to 5.
  *   WEBSEARCH_THINKING      "enabled" (default) or "disabled".
- *   WEBSEARCH_SEARCH_API    "messages" (default) or "native".
+ *   WEBSEARCH_SEARCH_API    "native" (default for deepseek) or "messages".
  *   WEBSEARCH_SEARCH_BASE_URL  Base URL for the native Search & Fetch APIs.
  *   WEBSEARCH_COUNT         Native result count (1-50), defaults to 10.
  *   WEBSEARCH_NEED_CONTENT  "true" to request page content from native search.
@@ -252,7 +254,7 @@ export interface WebsearchOptions {
   maxUses?: number | string
   /** `enabled` or `disabled`. */
   thinking?: string
-  /** Search backend: `messages` (default) or `native`. */
+  /** Search backend; native for deepseek or when searchBaseUrl is set, else messages. */
   searchApi?: string
   /** Base URL for the native Search & Fetch APIs. */
   searchBaseUrl?: string
@@ -326,6 +328,20 @@ export function resolveEndpoint(options?: WebsearchOptions): string {
 }
 
 /**
+ * Default backend when `searchApi` is not configured. A `searchBaseUrl`
+ * (option or env) selects native for any provider and takes priority over
+ * `baseUrl`. Otherwise: native for DeepSeek unless a custom Messages `baseUrl`
+ * is set; messages for every other provider.
+ */
+export function defaultSearchApi(options?: WebsearchOptions): SearchApi {
+  const searchBaseUrl = readString(options?.searchBaseUrl) ?? readEnv("WEBSEARCH_SEARCH_BASE_URL")
+  if (searchBaseUrl) return "native"
+  if (resolveProvider(options) !== DEFAULT_PROVIDER) return "messages"
+  if (readString(options?.baseUrl)) return "messages"
+  return "native"
+}
+
+/**
  * Resolve the search backend. Unknown explicit values are rejected so a typo
  * does not silently fall back to the other backend.
  */
@@ -335,7 +351,7 @@ export function resolveSearchApi(options?: WebsearchOptions): SearchApi {
     throw new Error('Invalid searchApi: expected "messages" or "native"')
   }
   const raw = readString(value) ?? readEnv("WEBSEARCH_SEARCH_API")
-  if (!raw) return "messages"
+  if (!raw) return defaultSearchApi(options)
   const normalized = raw.toLowerCase()
   if (normalized === "messages" || normalized === "native") return normalized
   throw new Error('Invalid searchApi: expected "messages" or "native"')

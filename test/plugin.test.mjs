@@ -194,6 +194,7 @@ test("toResults returns the answer first, then sources, and never empty", () => 
 async function register() {
   let captured
   const fake = {
+    options: { searchApi: "messages" },
     websearch: {
       async transform(callback) {
         callback({
@@ -235,6 +236,82 @@ test("setup registers the DeepSeek provider", async () => {
   const provider = await register()
   assert.equal(provider.id, "deepseek")
   assert.equal(provider.name, "DeepSeek Web Search")
+})
+
+test("default backend is native for DeepSeek and skips the model", async () => {
+  let captured
+  let modelCalls = 0
+  const fake = {
+    options: { apiKey: "test-key" },
+    model: {
+      async default() {
+        modelCalls++
+        return { providerID: "deepseek", modelID: "should-not-be-used" }
+      },
+    },
+    websearch: {
+      async transform(callback) {
+        callback({
+          add(provider) {
+            captured = provider
+          },
+          default: { set() {} },
+        })
+      },
+    },
+  }
+  await plugin.setup(fake)
+
+  let seen
+  globalThis.fetch = async (url, init) => {
+    seen = { url, init }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => "",
+      json: async () => ({ results: [{ url: "https://a.example/x", title: "A", summary: "S" }] }),
+    }
+  }
+
+  const results = await captured.execute({ query: "hi" }, {})
+  assert.equal(seen.url, SEARCH_URL)
+  assert.deepEqual(JSON.parse(seen.init.body), { query: "hi", count: 10, need_content: false })
+  assert.equal(results[0].url, "https://a.example/x")
+  assert.equal(results[0].content, "S")
+  assert.equal(modelCalls, 0)
+})
+
+test("anthropic provider still defaults to messages", async () => {
+  let captured
+  const fake = {
+    options: { provider: "anthropic", apiKey: "k", model: "claude-test" },
+    websearch: {
+      async transform(callback) {
+        callback({
+          add(provider) {
+            captured = provider
+          },
+          default: { set() {} },
+        })
+      },
+    },
+  }
+  await plugin.setup(fake)
+
+  let seen
+  globalThis.fetch = async (url, init) => {
+    seen = { url, init }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => "",
+      json: async () => ({ content: [{ type: "text", text: "OK" }] }),
+    }
+  }
+
+  const results = await captured.execute({ query: "hi" }, {})
+  assert.equal(seen.url, "https://api.anthropic.com/v1/messages")
+  assert.equal(results[0].content, "OK")
 })
 
 test("execute sends the API key, version header, and improvements", async () => {
@@ -438,6 +515,7 @@ test("execute reuses the stored DeepSeek credential when no env key is set", asy
         })
       },
     },
+    options: { searchApi: "messages" },
     integration: {
       connection: {
         active: async (id) =>
@@ -479,6 +557,7 @@ test("environment key takes precedence over the stored credential", async () => 
         })
       },
     },
+    options: { searchApi: "messages" },
     integration: {
       connection: {
         active: async () => {
@@ -523,7 +602,13 @@ test("plugin options configure key, model, max_uses, and thinking", async () => 
         })
       },
     },
-    options: { apiKey: "sk-option-key", model: "my-model", maxUses: 9, thinking: "disabled" },
+    options: {
+      searchApi: "messages",
+      apiKey: "sk-option-key",
+      model: "my-model",
+      maxUses: 9,
+      thinking: "disabled",
+    },
   }
   await plugin.setup(fake)
   process.env.DEEPSEEK_API_KEY = "sk-env"
@@ -563,7 +648,7 @@ test("invalid options fall back to environment variables", async () => {
         })
       },
     },
-    options: { model: "", maxUses: "abc", thinking: "garbage" },
+    options: { searchApi: "messages", model: "", maxUses: "abc", thinking: "garbage" },
   }
   process.env.WEBSEARCH_MODEL = "env-model"
   await plugin.setup(fake)
@@ -953,6 +1038,7 @@ test("setup registers the Code Mode tool", async () => {
 test("Code Mode tool returns structured output and text content", async () => {
   let toolDef
   const fake = {
+    options: { searchApi: "messages" },
     websearch: {
       async transform(callback) {
         callback({ add() {}, default: { set() {} } })
@@ -1027,6 +1113,7 @@ test("resolveEndpoint rejects a non-http baseUrl", () => {
 test("Code Mode tool normalises title for citation-only sources", async () => {
   let toolDef
   const fake = {
+    options: { searchApi: "messages" },
     websearch: {
       async transform(callback) {
         callback({ add() {}, default: { set() {} } })
@@ -1115,16 +1202,37 @@ test("toContent omits the leading blank line when the answer is empty", () => {
   assert.match(content, /https:\/\/a/)
 })
 
-test("resolveSearchApi defaults to messages and rejects unknown values", () => {
+test("resolveSearchApi defaults to native for DeepSeek and messages otherwise", () => {
   delete process.env.WEBSEARCH_SEARCH_API
-  assert.equal(resolveSearchApi(undefined), "messages")
-  assert.equal(resolveSearchApi({}), "messages")
+  delete process.env.WEBSEARCH_SEARCH_BASE_URL
+  assert.equal(resolveSearchApi(undefined), "native")
+  assert.equal(resolveSearchApi({}), "native")
+  assert.equal(resolveSearchApi({ provider: "anthropic" }), "messages")
+  assert.equal(resolveSearchApi({ provider: "custom" }), "messages")
+  assert.equal(resolveSearchApi({ searchBaseUrl: "https://native.example" }), "native")
+  assert.equal(resolveSearchApi({ baseUrl: "https://proxy.example/v1/messages" }), "messages")
+  assert.equal(
+    resolveSearchApi({
+      baseUrl: "https://proxy.example/v1/messages",
+      searchBaseUrl: "https://native.example",
+    }),
+    "native",
+  )
+  assert.equal(
+    resolveSearchApi({ provider: "anthropic", searchBaseUrl: "https://native.example" }),
+    "native",
+  )
   assert.equal(resolveSearchApi({ searchApi: "native" }), "native")
   assert.equal(resolveSearchApi({ searchApi: " NATIVE " }), "native")
   assert.equal(resolveSearchApi({ searchApi: "messages" }), "messages")
+  process.env.WEBSEARCH_SEARCH_API = "messages"
+  assert.equal(resolveSearchApi({}), "messages")
   process.env.WEBSEARCH_SEARCH_API = "native"
-  assert.equal(resolveSearchApi({}), "native")
+  assert.equal(resolveSearchApi({ provider: "anthropic" }), "native")
   delete process.env.WEBSEARCH_SEARCH_API
+  process.env.WEBSEARCH_SEARCH_BASE_URL = "https://env-native.example"
+  assert.equal(resolveSearchApi({ provider: "anthropic" }), "native")
+  delete process.env.WEBSEARCH_SEARCH_BASE_URL
   assert.throws(() => resolveSearchApi({ searchApi: "web" }), /Invalid searchApi/)
   assert.throws(() => resolveSearchApi({ searchApi: 5 }), /Invalid searchApi/)
 })
@@ -2193,7 +2301,7 @@ test("messages does not return results aborted during response parsing", async (
 test("a timed-out model lookup does not block and recovers in the background", async () => {
   let captured
   await plugin.setup({
-    options: { provider: "deepseek", apiKey: "k" },
+    options: { provider: "deepseek", searchApi: "messages", apiKey: "k" },
     model: {
       async default() {
         await new Promise((resolve) => setTimeout(resolve, 2500))
@@ -2385,8 +2493,12 @@ test("tool schema advertises the backend query limit", async () => {
   assert.match(toolDef.input.properties.query.description, /128/)
 
   toolDef = undefined
-  await plugin.setup(fake({ apiKey: "k" }))
+  await plugin.setup(fake({ searchApi: "messages", apiKey: "k" }))
   assert.equal(toolDef.input.properties.query.maxLength, 8192)
+
+  toolDef = undefined
+  await plugin.setup(fake({ apiKey: "k" }))
+  assert.equal(toolDef.input.properties.query.maxLength, 128)
 })
 
 test("unknown provider gets a neutral display name", async () => {
@@ -2857,7 +2969,7 @@ test("a late model lookup is picked up after the refresh window", async () => {
   let calls = 0
   let captured
   await plugin.setup({
-    options: { provider: "deepseek", apiKey: "k" },
+    options: { provider: "deepseek", searchApi: "messages", apiKey: "k" },
     model: {
       async default() {
         calls++

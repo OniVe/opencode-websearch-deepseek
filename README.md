@@ -3,14 +3,15 @@
 A web search provider for OpenCode's **built-in** `websearch` tool with two
 backends:
 
-- **`messages`** (default) — speaks the Anthropic Messages protocol with the
-  server-side `web_search_20250305` tool. The provider searches and writes a
-  synthesized answer. [DeepSeek](https://deepseek.com) is the default provider
-  (its Anthropic-compatible endpoint emulates the same protocol); any
-  Anthropic-compatible endpoint can be selected.
-- **`native`** — uses DeepSeek's JSON
+- **`native`** (default for DeepSeek, or whenever `searchBaseUrl` is set) —
+  uses DeepSeek's JSON
   [Search & Fetch APIs](https://api-docs.deepseek.com/api/search): structured
   results, optional page content, and optional full-page Markdown via Fetch.
+  The calling model writes the answer from the returned sources.
+- **`messages`** — backward-compatible Anthropic Messages backend with the
+  server-side `web_search_20250305` tool. The provider searches and writes a
+  synthesized answer. It remains the default for other providers without a
+  `searchBaseUrl` and can be selected explicitly with `searchApi: "messages"`.
 
 It registers through the OpenCode V2 plugin API (`ctx.websearch.transform`) as a
 native search provider, so **no MCP server is required**, and also exposes the
@@ -20,8 +21,8 @@ supports tools.
 - Zero runtime dependencies (uses the global `fetch`).
 - Provider presets: `deepseek` (default) and `anthropic`, plus any custom
   Anthropic-compatible endpoint via `baseUrl`.
-- Configurable provider, model, `max_uses`, thinking mode, and native
-  result/fetch options.
+- Configurable provider, native result/fetch options, and the legacy
+  `messages` model/`max_uses`/thinking options.
 
 ## Requirements
 
@@ -84,29 +85,34 @@ from `ctx.options`):
       "options": {
         "provider": "deepseek",
         "apiKey": "{file:~/.config/opencode/deepseek.key}",
-        "model": "deepseek-v4-flash",
-        "maxUses": 5,
-        "thinking": "enabled",
-        "searchApi": "messages"
+        "searchApi": "native",
+        "count": 10,
+        "needContent": false,
+        "fetch": 0
       }
     }
   ]
 }
 ```
 
-| Option          | Default           | Description                                            |
-| --------------- | ----------------- | ------------------------------------------------------ |
-| `provider`      | `deepseek`        | Preset (`deepseek`, `anthropic`) or any integration id. |
-| `baseUrl`       | provider endpoint | Full Anthropic-compatible `/v1/messages` URL override. |
-| `apiKey`        | —                 | API key; takes precedence over env and the credential. |
-| `model`         | provider default  | Model used for search and synthesis (`messages`).      |
-| `maxUses`       | `5`               | Max server-side searches per query (`messages`).       |
-| `thinking`      | `enabled`         | `enabled` or `disabled` (`messages`).                  |
-| `searchApi`     | `messages`        | `messages` (answer) or `native` (DeepSeek JSON APIs).  |
-| `searchBaseUrl` | derived           | Base URL (origin/prefix) for the native APIs.          |
-| `count`         | `10`              | Native results to request (1–50).                      |
-| `needContent`   | `false`           | Pass `need_content` to the native Search API.          |
-| `fetch`         | `0`               | Fetch full page Markdown for the top N native results. |
+| Option          | Default                     | Description                                            |
+| --------------- | --------------------------- | ------------------------------------------------------ |
+| `provider`      | `deepseek`                  | Preset (`deepseek`, `anthropic`) or any integration id. |
+| `baseUrl`       | provider endpoint           | Full Anthropic-compatible `/v1/messages` URL override. |
+| `apiKey`        | —                           | API key; takes precedence over env and the credential. |
+| `model`         | provider default            | Model used for search and synthesis (`messages`).      |
+| `maxUses`       | `5`                         | Max server-side searches per query (`messages`).       |
+| `thinking`      | `enabled`                   | `enabled` or `disabled` (`messages`).                  |
+| `searchApi`     | see below                   | `native` (DeepSeek JSON APIs) or `messages` (answer).  |
+| `searchBaseUrl` | derived                     | Base URL (origin/prefix) for the native APIs.          |
+| `count`         | `10`                        | Native results to request (1–50).                      |
+| `needContent`   | `false`                     | Pass `need_content` to the native Search API.          |
+| `fetch`         | `0`                         | Fetch full page Markdown for the top N native results. |
+
+When `searchApi` is unset, a `searchBaseUrl` (option or env) selects `native`
+for any provider and takes priority over `baseUrl`. Otherwise `native` is used for
+`deepseek` unless a custom `baseUrl` (Messages endpoint) is configured, and
+`messages` is used for other providers.
 
 `count`, `needContent`, and `fetch` are ignored in `messages` mode.
 
@@ -120,7 +126,7 @@ from `ctx.options`):
 | `WEBSEARCH_MODEL`    | any       | Model override (`messages`).                         |
 | `WEBSEARCH_MAX_USES` | any       | Max searches per query, positive integer (default 5).|
 | `WEBSEARCH_THINKING` | any       | `enabled` (default) or `disabled`.                   |
-| `WEBSEARCH_SEARCH_API` | any     | `messages` (default) or `native`.                    |
+| `WEBSEARCH_SEARCH_API` | any     | `native` (default for deepseek) or `messages`.       |
 | `WEBSEARCH_SEARCH_BASE_URL` | any | Base URL for the native Search & Fetch APIs.       |
 | `WEBSEARCH_COUNT`    | native    | Results per native search (1–50, default 10).        |
 | `WEBSEARCH_NEED_CONTENT` | native | `true` to request page content.                    |
@@ -141,7 +147,9 @@ from `ctx.options`):
   (`https://api.deepseek.com/anthropic/v1/messages`,
   `https://api.anthropic.com/v1/messages`).
 - **`maxUses` / `thinking`:** option → env var → default.
-- **`searchApi`:** option → `WEBSEARCH_SEARCH_API` → `messages`.
+- **`searchApi`:** option → `WEBSEARCH_SEARCH_API` → `native` when
+  `searchBaseUrl` is set; otherwise `native` for `deepseek` unless a custom
+  `baseUrl` is set; `messages` for other providers.
 - **Native base URL:** `options.searchBaseUrl` → env → derived from `baseUrl`
   by stripping its `/anthropic/v1/messages` or `/v1/messages` suffix (otherwise
   set `searchBaseUrl`) → `https://api.deepseek.com`.
@@ -155,8 +163,9 @@ can live in a file instead of the OS environment.
 
 ### Native Search & Fetch
 
-Set `searchApi: "native"` to use DeepSeek's raw JSON APIs instead of the
-Messages tool:
+`native` is the default for DeepSeek, and for any provider when `searchBaseUrl`
+is set (unless `searchApi: "messages"` is explicit). It uses
+DeepSeek's raw JSON APIs instead of the Messages tool:
 
 ```jsonc
 {
@@ -214,6 +223,16 @@ Messages tool:
   sends the API key in clear text. Responses are capped at 8 MiB (success) and
   64 KiB (error bodies); requests reject redirects.
 
+### Messages (backward compatibility)
+
+Set `searchApi: "messages"` to keep the legacy Anthropic-compatible backend:
+the provider runs the server-side `web_search_20250305` tool and returns a
+synthesized answer plus citations. It is also the default for other providers
+without a `searchBaseUrl`. `model`, `maxUses`, and `thinking` apply only in
+this mode. Use it
+when a consumer needs a ready answer, for complex multi-round research, or with
+Anthropic.
+
 ## Code Mode (execute)
 
 When the runtime exposes the V2 tool API, the plugin also registers
@@ -237,15 +256,15 @@ return { answer, top: sources.slice(0, 3).map((s) => s.url) }
 
 1. The model calls the built-in `websearch` tool (or a Code Mode program calls
    `tools.websearch.search`).
-2. **`searchApi: "messages"`** (default): the plugin sends the query to the
-   selected provider's Anthropic-compatible Messages endpoint with the
+2. **`native`** (default for DeepSeek, or when `searchBaseUrl` is set): the
+   plugin calls `POST /v1/tools/search`, maps the structured results to sources, optionally
+   enriches the top N through `POST /v1/tools/fetch`, and returns the sources
+   (no synthesized answer).
+3. **`searchApi: "messages"`**: the plugin sends the query to the selected
+   provider's Anthropic-compatible Messages endpoint with the
    `web_search_20250305` server-side tool enabled. The provider searches and
    writes a synthesized answer; the plugin returns that answer plus the
    de-duplicated source URLs.
-3. **`searchApi: "native"`**: the plugin calls DeepSeek's
-   `POST /v1/tools/search`, maps the structured results to sources, optionally
-   enriches the top N through `POST /v1/tools/fetch`, and returns the sources
-   (no synthesized answer).
 
 ## Releases
 
@@ -271,7 +290,8 @@ bun run format      # biome format --write
 The plugin is a thin wrapper: pure helpers (`buildRequestBody`, `dedupeSources`,
 `extractAnswerAndSources`, `mapNativeResults`, `toResults`, `toContent`,
 `toSourceObjects`, `resolveApiKey`, `resolveEndpoint`, `resolveModel`,
-`resolveProvider`, `resolveSearchApi`, `resolveSearchBaseUrl`, `resolveCount`,
+`resolveProvider`, `resolveSearchApi`, `defaultSearchApi`,
+`resolveSearchBaseUrl`, `resolveCount`,
 `resolveNeedContent`, `resolveFetchCount`, `resolveMaxUses`, `resolveThinking`)
 are exported separately and covered by unit tests with a mocked `fetch`.
 

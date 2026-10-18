@@ -20,7 +20,7 @@ async function setupProvider(options = { apiKey: "smoke-key" }) {
   return provider
 }
 
-const provider = await setupProvider()
+const provider = await setupProvider({ searchApi: "messages", apiKey: "smoke-key" })
 
 globalThis.fetch = async (_url, init) => {
   assert.equal(init.redirect, "error")
